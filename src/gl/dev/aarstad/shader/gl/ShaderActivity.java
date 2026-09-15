@@ -48,6 +48,10 @@ public final class ShaderActivity extends HostActivity {
 
         view = new GLSurfaceView(this);
         view.setEGLContextClientVersion(2);
+        // Without this the EGL context is destroyed whenever the app leaves the
+        // foreground, while queued events keep running on the GL thread -- so a
+        // pushed shader compiles against nothing and fails with an empty log.
+        view.setPreserveEGLContextOnPause(true);
         view.setRenderer(renderer);
         view.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         return view;

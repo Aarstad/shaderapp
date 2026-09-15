@@ -294,9 +294,12 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
      */
     private static String describe(String log, String stage) {
         if (log != null && !log.trim().isEmpty()) return log;
+        // An empty log with no GL error almost always means the context went
+        // away, which on this path means the app is off screen.
         return stage + " failed with no driver log; glGetError=0x"
             + Integer.toHexString(GLES20.glGetError())
-            + " vs=" + lastVs + "\n";
+            + " vs=" + lastVs
+            + " -- the GL context looks gone; is the app on screen?\n";
     }
 
     /** Set when the shared vertex shader is built; 0 means it never was. */
