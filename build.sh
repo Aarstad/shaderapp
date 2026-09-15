@@ -28,6 +28,24 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex"
 
+# Shaders are compiled by the driver at runtime, so a broken one would only
+# show up on the phone. glslangValidator catches it here instead.
+if command -v glslangValidator >/dev/null; then
+  echo "[0/6] glsl check"
+  for f in assets/shaders/*.frag; do
+    { echo "#version 100"; cat assets/shaders/_head.glsl; cat "$f"; } > "$OUT/check.frag"
+    glslangValidator -S frag "$OUT/check.frag" >/dev/null || {
+      echo "  $f does not compile:" >&2
+      { echo "#version 100"; cat assets/shaders/_head.glsl; cat "$f"; } > "$OUT/check.frag"
+      glslangValidator -S frag "$OUT/check.frag" >&2
+      exit 1
+    }
+  done
+  rm -f "$OUT/check.frag"
+else
+  echo "[0/6] glsl check skipped (no glslangValidator)"
+fi
+
 echo "[1/6] aapt: resources + R.java + base apk"
 aapt package -f -m \
   -J "$OUT/gen" \

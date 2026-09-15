@@ -63,6 +63,14 @@ if [ ! -x "$SDK/kotlinc/bin/kotlinc" ]; then
   chmod +x "$SDK/kotlinc/bin/"*
 fi
 
+# Validates shaders at build time; they are otherwise only checked by the
+# driver, on the phone, at runtime.
+if ! command -v glslangValidator >/dev/null; then
+  echo "[apt] glslang-tools"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y glslang-tools >/dev/null 2>&1 \
+    || echo "  could not install glslang-tools; build.sh will skip the check"
+fi
+
 echo
 echo "[verify] d8"
 java -cp "$SDK/d8.jar" com.android.tools.r8.D8 --version
