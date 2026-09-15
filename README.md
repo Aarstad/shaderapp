@@ -56,6 +56,23 @@ the Termux repos. Build it inside the proot Ubuntu container:
 
 Adjust `ANDROID_JAR` at the top of `build.sh` if the SDK lives elsewhere.
 
+## Installing
+
+`./deploy.sh` builds, installs over adb and launches, in one step.
+
+adb talks to this phone over Wireless debugging (Developer options), which also
+sidesteps the package installer's Play Protect prompt on every sideload. Pair
+once per reboot -- the ports are on the Wireless debugging screen, and the
+pairing port differs from the connect port:
+
+    adb pair 127.0.0.1:<pairing-port>    # 6-digit code from "Pair device with pairing code"
+    adb connect 127.0.0.1:<port>
+
+127.0.0.1 works because Termux is on the same device it is debugging.
+
+Without adb, `termux-open shader.apk` hands the APK to the system installer
+instead.
+
 ## Signing
 
 `build.sh` generates `debug.keystore` on first run (storepass/keypass
