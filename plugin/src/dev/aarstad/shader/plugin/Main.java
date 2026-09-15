@@ -101,15 +101,31 @@ public final class Main implements Plugin {
             return "decay " + decay;
         }
 
+        // Fire the tap envelope without anyone touching the screen. This verb
+        // did not exist in the dex that was running a minute ago.
+        if (verb.equals("burst")) {
+            if (arg.length > 2) {
+                try {
+                    tx = Float.parseFloat(arg[1]);
+                    ty = Float.parseFloat(arg[2]);
+                } catch (NumberFormatException e) {
+                    return "burst wants two numbers in [-1,1], or nothing";
+                }
+            }
+            tappedAt = host.seconds();
+            host.toast("burst");
+            return "burst at " + tx + "," + ty;
+        }
+
         if (verb.equals("status")) {
-            return "touch " + tx + "," + ty
+            return "touchwarp/2  touch " + tx + "," + ty
                 + "  down " + down
                 + "  decay " + decay
                 + "  cycle " + (cycleEvery > 0f ? cycleEvery + "s" : "off")
                 + "  preset " + host.presetName(host.currentPreset());
         }
 
-        return "commands: cycle <s>|off, decay <n>, status";
+        return "commands: cycle <s>|off, decay <n>, burst [x y], status";
     }
 
     @Override
