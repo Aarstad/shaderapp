@@ -163,11 +163,12 @@ normally what stops Android builds working here -- but Debian builds its
 |---|---|
 | `d8.jar` | the dexer, out of build-tools 37 |
 | `android-34.jar` | the compile classpath |
+| `kotlinc/` | the Kotlin compiler and stdlib |
 
-Both are architecture independent -- `d8` is a self-contained Java jar and
-`android.jar` is a classpath stub -- so neither cares that this is an ARM
-phone. Only those two files are kept; the rest of build-tools is x86_64 native
-binaries that would not run here.
+All of it is architecture independent -- `d8` and `kotlinc` are JVM programs,
+`android.jar` and `kotlin-stdlib.jar` are plain jars -- so none of it cares
+that this is an ARM phone. Only the two files that are needed get kept out of
+build-tools; the rest is x86_64 native binaries that would not run here.
 
 **Use build-tools 37, not 34.** The `d8` in 34 (8.2.2-dev) dies with a
 `NullPointerException` while writing the dex on this container's JDK 25. It is

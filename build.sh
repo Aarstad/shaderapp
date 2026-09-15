@@ -15,6 +15,7 @@ cd "$(dirname "$0")"
 SDK=${SDK:-/opt/shader-sdk}
 ANDROID_JAR="$SDK/android-34.jar"
 D8_JAR="$SDK/d8.jar"
+KOTLIN_STDLIB="$SDK/kotlinc/lib/kotlin-stdlib.jar"
 MIN_SDK=21
 TARGET_SDK=34
 OUT=build
@@ -44,17 +45,26 @@ javac --release 17 -nowarn -Xlint:-options \
   -d "$OUT/classes" \
   $(find src "$OUT/gen" -name '*.java')
 
-echo "[3/6] d8: classes -> dex"
+# The Kotlin stdlib ships in the APK rather than in pushed dex. It is
+# infrastructure -- the same side of the line as the Plugin interface -- so a
+# Kotlin plugin stays a few KB per push instead of carrying 1.8 MB, and a swap
+# doesn't reload the whole stdlib. Costs about a megabyte of APK; R8 with keep
+# rules would trim it if that ever mattered.
+echo "[3/6] d8: classes + kotlin stdlib -> dex"
 java -cp "$D8_JAR" com.android.tools.r8.D8 \
   --release \
   --min-api "$MIN_SDK" \
   --lib "$ANDROID_JAR" \
   --output "$OUT/dex" \
-  $(find "$OUT/classes" -name '*.class')
-cp "$OUT/dex/classes.dex" "$OUT/classes.dex"
+  $(find "$OUT/classes" -name '*.class') \
+  "$KOTLIN_STDLIB"
+cp "$OUT"/dex/classes*.dex "$OUT/"
 
 echo "[4/6] aapt add: dex into apk"
-( cd "$OUT" && aapt add -f base.apk classes.dex >/dev/null )
+# Plural on purpose: stdlib could push us past the 64K method limit into
+# classes2.dex, and d8 names the overflow itself.
+( cd "$OUT" && aapt add -f base.apk classes*.dex >/dev/null )
+echo "      dex files: $(cd "$OUT" && ls classes*.dex | tr '\n' ' ')"
 
 echo "[5/6] zipalign"
 zipalign -f 4 "$OUT/base.apk" "$OUT/shader-unsigned.apk"
