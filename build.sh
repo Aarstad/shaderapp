@@ -16,6 +16,7 @@ aapt package -f -m \
   -J "$OUT/gen" \
   -M AndroidManifest.xml \
   -S res \
+  -A assets \
   -I "$ANDROID_JAR" \
   -F "$OUT/base.apk" \
   --min-sdk-version "$MIN_SDK" \

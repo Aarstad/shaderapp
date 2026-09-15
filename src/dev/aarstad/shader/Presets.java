@@ -1,139 +1,208 @@
 package dev.aarstad.shader;
 
+import android.content.Context;
+import android.content.res.AssetManager;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+
 /**
- * Fragment shaders, one per preset. Every one is GLSL ES 1.00 and takes the
- * same uniforms -- u_res (pixels) and u_time (seconds) -- so the renderer can
- * swap between them without special-casing.
+ * Where shader source comes from, and where pushed source goes.
  *
- * Budget: these target a mid-range Mali at 1080p/60. Loop counts are the knob
- * to turn first if a preset drops frames.
+ * Two layers. The APK's assets/shaders/ holds the presets that ship with the
+ * build; getFilesDir()/presets/ holds anything pushed over the loopback server
+ * at runtime. A file in the overlay shadows the asset of the same name, so a
+ * pushed shader survives the app being killed, and deleting the overlay file
+ * reverts to the built-in.
+ *
+ * Every fragment shader is GLSL ES 1.00 and gets _head.glsl prepended, which
+ * supplies u_res, u_time, centred() and palette(). That is what lets the
+ * renderer swap between presets without special-casing any of them.
  */
 final class Presets {
 
+    /** Name plus the *body* of the shader -- head is prepended at compile time. */
+    static final class Preset {
+        final String name;
+        final String body;
+        final boolean patched;
+
+        Preset(String name, String body, boolean patched) {
+            this.name = name;
+            this.body = body;
+            this.patched = patched;
+        }
+    }
+
+    private static final String DIR = "shaders";
+    private static final String HEAD_ASSET = DIR + "/_head.glsl";
+    private static final String ORDER_ASSET = DIR + "/order.txt";
+
+    /** Drawn when a shader won't compile, so a bad push can't leave a black screen. */
+    static final String FALLBACK_BODY =
+        "void main() {\n" +
+        "    vec2 uv = centred();\n" +
+        "    float w = 0.5 + 0.5 * sin(u_time * 3.0);\n" +
+        "    float d = step(0.5, fract((uv.x + uv.y) * 2.0 + u_time * 0.5));\n" +
+        "    gl_FragColor = vec4(mix(0.25, 0.75, d) * vec3(w, 0.05, 0.12), 1.0);\n" +
+        "}\n";
+
     private Presets() {}
 
-    /** Shared preamble: uniforms plus a centred, aspect-corrected uv in [-1,1]. */
-    private static final String HEAD =
-        "precision highp float;\n" +
-        "uniform vec2 u_res;\n" +
-        "uniform float u_time;\n" +
-        "vec2 centred() {\n" +
-        "    return (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);\n" +
-        "}\n" +
-        "vec3 palette(float x) {\n" +
-        "    return 0.5 + 0.5 * cos(vec3(0.0, 2.1, 4.2) + x);\n" +
-        "}\n";
+    static String overlayDir(Context ctx) {
+        return new File(ctx.getFilesDir(), "presets").getAbsolutePath();
+    }
 
-    // Domain-warped plasma. Five warp iterations is about the most a mid-range
-    // Mali will hold at 60fps on a 1080p-class screen.
-    private static final String PLASMA = HEAD +
-        "void main() {\n" +
-        "    vec2 uv = centred();\n" +
-        "    float t = u_time * 0.35;\n" +
-        "    vec2 p = uv;\n" +
-        "    for (int i = 0; i < 5; i++) {\n" +
-        "        p += vec2(sin(p.y * 3.0 + t), cos(p.x * 3.0 - t)) * 0.25;\n" +
-        "    }\n" +
-        "    float d = length(p);\n" +
-        "    vec3 col = palette(d * 3.0 + t);\n" +
-        "    col *= 1.0 - 0.35 * length(uv);\n" +
-        "    gl_FragColor = vec4(col, 1.0);\n" +
-        "}\n";
+    /**
+     * Preset names are used as filenames and echoed into HTTP responses, so the
+     * server only accepts this shape -- no dots, no separators, no traversal.
+     */
+    static boolean validName(String name) {
+        if (name == null || name.isEmpty() || name.length() > 40) return false;
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9') || c == '_' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    }
 
-    // Perspective tunnel. Depth goes as 1/r, which is what makes the rings
-    // bunch up towards the centre; the max() keeps the axis from exploding.
-    private static final String TUNNEL = HEAD +
-        "void main() {\n" +
-        "    vec2 uv = centred();\n" +
-        "    float r = length(uv);\n" +
-        "    float a = atan(uv.y, uv.x);\n" +
-        "    float depth = 0.35 / max(r, 0.04) + u_time * 0.6;\n" +
-        "    float rings  = sin(depth * 6.2831853);\n" +
-        "    float spokes = sin(a * 6.0 + depth * 1.5);\n" +
-        "    float grid = smoothstep(0.0, 0.6, rings * spokes);\n" +
-        "    vec3 col = palette(depth * 0.8);\n" +
-        "    col *= 0.25 + 0.75 * grid;\n" +
-        "    col *= smoothstep(1.5, 0.15, r);\n" +
-        "    gl_FragColor = vec4(col, 1.0);\n" +
-        "}\n";
+    /** The preamble every shader body is compiled on top of. */
+    static String head(Context ctx) {
+        try {
+            return readAsset(ctx.getAssets(), HEAD_ASSET);
+        } catch (IOException e) {
+            // Without the head nothing compiles, so fail loudly here rather
+            // than as five identical "undefined centred()" logs later.
+            throw new IllegalStateException("assets/" + HEAD_ASSET + " missing from the APK", e);
+        }
+    }
 
-    // Six-fold mirror over an inversion fold. Folding the angle before the
-    // fractal is what gives it the kaleidoscope symmetry rather than noise.
-    private static final String KALEIDOSCOPE = HEAD +
-        "void main() {\n" +
-        "    vec2 uv = centred();\n" +
-        "    float r = length(uv);\n" +
-        "    float a = atan(uv.y, uv.x);\n" +
-        "    float seg = 6.2831853 / 6.0;\n" +
-        "    a = abs(mod(a, seg) - seg * 0.5);\n" +
-        "    float t = u_time * 0.5;\n" +
-        "    vec2 p = vec2(cos(a), sin(a)) * r * 2.2 - 0.7;\n" +
-        "    float v = 0.0;\n" +
-        "    for (int i = 0; i < 4; i++) {\n" +
-        "        p = abs(p) / max(dot(p, p), 0.001) - (0.7 + 0.15 * sin(t));\n" +
-        "        v += exp(-3.0 * abs(p.x - p.y));\n" +
-        "    }\n" +
-        "    vec3 col = palette(v * 1.5 + t);\n" +
-        "    col *= 0.4 + 0.6 * smoothstep(1.8, 0.2, r);\n" +
-        "    gl_FragColor = vec4(col, 1.0);\n" +
-        "}\n";
+    /** How many lines the head adds, so compile errors can be mapped back to the file. */
+    static int headLines(String head) {
+        int n = 0;
+        for (int i = 0; i < head.length(); i++) if (head.charAt(i) == '\n') n++;
+        return n;
+    }
 
-    // Four metaballs summed as an inverse-distance field, thresholded with a
-    // smoothstep so they fuse instead of overlapping as discs.
-    private static final String METABALLS = HEAD +
-        "float ball(vec2 uv, vec2 c, float r) {\n" +
-        "    return r / max(length(uv - c), 0.001);\n" +
-        "}\n" +
-        "void main() {\n" +
-        "    vec2 uv = centred();\n" +
-        "    float t = u_time * 0.7;\n" +
-        "    float f = 0.0;\n" +
-        "    f += ball(uv, vec2(sin(t * 1.1), cos(t * 0.9)) * 0.55, 0.30);\n" +
-        "    f += ball(uv, vec2(cos(t * 0.7), sin(t * 1.3)) * 0.60, 0.26);\n" +
-        "    f += ball(uv, vec2(sin(t * 0.5 + 2.0), sin(t * 0.8)) * 0.50, 0.22);\n" +
-        "    f += ball(uv, vec2(cos(t * 1.5), cos(t * 0.4 + 1.0)) * 0.45, 0.18);\n" +
-        "    float m = smoothstep(1.6, 2.6, f);\n" +
-        "    vec3 col = mix(vec3(0.03, 0.04, 0.09), palette(f * 0.9 + t * 0.4), m);\n" +
-        "    col += 0.15 * smoothstep(1.2, 2.0, f);\n" +
-        "    gl_FragColor = vec4(col, 1.0);\n" +
-        "}\n";
+    /**
+     * Built-in order first, then anything in the overlay that isn't a built-in,
+     * alphabetically. So pushing a brand new name appends it to the cycle and
+     * pushing an existing one replaces it in place.
+     */
+    static List<Preset> load(Context ctx) {
+        AssetManager assets = ctx.getAssets();
+        File overlay = new File(overlayDir(ctx));
 
-    // Animated Voronoi. Tracking the two nearest seeds and shading on their
-    // difference draws the cell borders; d1 alone would only give blobs.
-    private static final String VORONOI = HEAD +
-        "vec2 hash2(vec2 p) {\n" +
-        "    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));\n" +
-        "    return fract(sin(p) * 43758.5453);\n" +
-        "}\n" +
-        "void main() {\n" +
-        "    vec2 g = centred() * 3.0;\n" +
-        "    vec2 cell = floor(g);\n" +
-        "    vec2 f = fract(g);\n" +
-        "    float t = u_time * 0.6;\n" +
-        "    float d1 = 8.0;\n" +
-        "    float d2 = 8.0;\n" +
-        "    for (int y = -1; y <= 1; y++) {\n" +
-        "        for (int x = -1; x <= 1; x++) {\n" +
-        "            vec2 o = vec2(float(x), float(y));\n" +
-        "            vec2 h = hash2(cell + o);\n" +
-        "            vec2 seed = o + 0.5 + 0.5 * sin(t + 6.2831853 * h);\n" +
-        "            float d = length(seed - f);\n" +
-        "            if (d < d1) { d2 = d1; d1 = d; }\n" +
-        "            else if (d < d2) { d2 = d; }\n" +
-        "        }\n" +
-        "    }\n" +
-        "    float edge = smoothstep(0.0, 0.25, d2 - d1);\n" +
-        "    vec3 col = palette(d1 * 2.5 + t * 0.5);\n" +
-        "    col *= 0.25 + 0.75 * edge;\n" +
-        "    gl_FragColor = vec4(col, 1.0);\n" +
-        "}\n";
+        LinkedHashSet<String> names = new LinkedHashSet<String>();
+        try {
+            for (String line : readAsset(assets, ORDER_ASSET).split("\n")) {
+                String n = line.trim();
+                if (!n.isEmpty() && validName(n)) names.add(n);
+            }
+        } catch (IOException e) {
+            // No order file -- the overlay scan below still finds pushed presets.
+        }
 
-    /** Cycle order. NAMES and SOURCES are parallel arrays. */
-    static final String[] NAMES = {
-        "Plasma", "Tunnel", "Kaleidoscope", "Metaballs", "Voronoi",
-    };
+        String[] extra = overlay.list();
+        if (extra != null) {
+            Arrays.sort(extra);
+            for (String f : extra) {
+                if (!f.endsWith(".frag")) continue;
+                String n = f.substring(0, f.length() - 5);
+                if (validName(n)) names.add(n);
+            }
+        }
 
-    static final String[] SOURCES = {
-        PLASMA, TUNNEL, KALEIDOSCOPE, METABALLS, VORONOI,
-    };
+        List<Preset> out = new ArrayList<Preset>();
+        for (String name : names) {
+            File patched = new File(overlay, name + ".frag");
+            if (patched.isFile()) {
+                try {
+                    out.add(new Preset(name, readFile(patched), true));
+                    continue;
+                } catch (IOException e) {
+                    // Unreadable overlay file: fall through to the built-in.
+                }
+            }
+            try {
+                out.add(new Preset(name, readAsset(assets, DIR + "/" + name + ".frag"), false));
+            } catch (IOException e) {
+                // Named in order.txt but absent from assets, and no overlay
+                // either. Nothing to draw, so leave it out of the cycle.
+            }
+        }
+
+        if (out.isEmpty()) out.add(new Preset("Fallback", FALLBACK_BODY, false));
+        return out;
+    }
+
+    /** Persist a pushed shader so it survives the process being killed. */
+    static void save(Context ctx, String name, String body) throws IOException {
+        File dir = new File(overlayDir(ctx));
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new IOException("could not create " + dir);
+        }
+        File tmp = new File(dir, name + ".frag.tmp");
+        FileOutputStream os = new FileOutputStream(tmp);
+        try {
+            os.write(body.getBytes("UTF-8"));
+        } finally {
+            os.close();
+        }
+        File dest = new File(dir, name + ".frag");
+        // Rename so a half-written file can never be picked up at next launch.
+        if (!tmp.renameTo(dest)) {
+            tmp.delete();
+            throw new IOException("could not write " + dest);
+        }
+    }
+
+    /** Drop a pushed shader. Returns false if there was nothing to revert. */
+    static boolean revert(Context ctx, String name) {
+        return new File(overlayDir(ctx), name + ".frag").delete();
+    }
+
+    /** @return the shader that ships in the APK under this name, or null. */
+    static String builtInBody(Context ctx, String name) {
+        try {
+            return readAsset(ctx.getAssets(), DIR + "/" + name + ".frag");
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static String readAsset(AssetManager assets, String path) throws IOException {
+        InputStream in = assets.open(path);
+        try {
+            return drain(in);
+        } finally {
+            in.close();
+        }
+    }
+
+    private static String readFile(File f) throws IOException {
+        InputStream in = new java.io.FileInputStream(f);
+        try {
+            return drain(in);
+        } finally {
+            in.close();
+        }
+    }
+
+    private static String drain(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        return out.toString("UTF-8");
+    }
 }
