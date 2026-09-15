@@ -1,4 +1,4 @@
-package dev.aarstad.shader;
+package dev.aarstad.shader.host;
 
 import android.app.Activity;
 import android.os.Bundle;
@@ -55,6 +55,22 @@ public interface Plugin {
      * and land under the finger. Return true to claim it.
      */
     String TOUCH = "touch";
+
+    /**
+     * A second screen opened. Argument: the ViewGroup to fill. Return false and
+     * the host closes it again, so a plugin that doesn't want one need do
+     * nothing.
+     */
+    String SCREEN_OPEN = "screen.open";
+
+    /** That second screen is going away. No arguments. */
+    String SCREEN_CLOSE = "screen.close";
+
+    /** The foreground service started. Argument: the String label it was given. */
+    String SERVICE_START = "service.start";
+
+    /** The foreground service is stopping. No arguments. */
+    String SERVICE_STOP = "service.stop";
 
     /** What plugin code is handed. */
     interface Host {

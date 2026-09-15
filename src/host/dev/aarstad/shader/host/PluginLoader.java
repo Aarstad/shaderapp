@@ -1,4 +1,4 @@
-package dev.aarstad.shader;
+package dev.aarstad.shader.host;
 
 import android.content.Context;
 
@@ -33,10 +33,10 @@ import dalvik.system.DexClassLoader;
  * few KB per swap on a development channel, which is a fair trade for not
  * having to restart.
  */
-final class PluginLoader {
+public final class PluginLoader {
 
     /** Class every pushed dex must provide, unless a push names another. */
-    static final String DEFAULT_CLASS = "dev.aarstad.shader.plugin.Main";
+    public static final String DEFAULT_CLASS = "dev.aarstad.shader.plugin.Main";
 
     private static final int LOG_LINES = 40;
 
@@ -63,9 +63,9 @@ final class PluginLoader {
 
     // ---- state ---------------------------------------------------------------
 
-    boolean active() { return plugin != null; }
+    public boolean active() { return plugin != null; }
 
-    String status() {
+    public String status() {
         Plugin p = plugin;
         if (p != null) return "plugin " + label + (armed ? " (unproven)" : " (ok)");
         return disarmFile().isFile() ? "plugin disabled after a failed load" : "plugin none";
@@ -76,20 +76,20 @@ final class PluginLoader {
      * Anything that was going to deadlock or kill the process has had its
      * chance, so stop holding the load against the plugin at next launch.
      */
-    void proved() {
+    public void proved() {
         if (!armed || plugin == null) return;
         armed = false;
         disarmFile().delete();
     }
 
-    void note(String line) {
+    public void note(String line) {
         synchronized (log) {
             log.addLast(line);
             while (log.size() > LOG_LINES) log.removeFirst();
         }
     }
 
-    String logs() {
+    public String logs() {
         StringBuilder sb = new StringBuilder();
         synchronized (log) {
             for (String s : log) sb.append(s).append('\n');
@@ -101,7 +101,7 @@ final class PluginLoader {
     //
     // Each of these is a no-op when no plugin is loaded, so callers don't branch.
 
-    boolean event(String name, Object... args) {
+    public boolean event(String name, Object... args) {
         Plugin p = plugin;
         if (p == null) return false;
         try {
@@ -113,23 +113,20 @@ final class PluginLoader {
     }
 
     /**
-     * Wrap a plugin-supplied callback in the same guard everything else gets,
-     * so a throw from inside a per-frame callback detaches rather than killing
-     * the render thread.
+     * Report a throw out of plugin code that this class did not call itself --
+     * a callback the plugin registered with some module, for instance. Same
+     * consequence as any other: logged, detached, dropped from the reload
+     * pointer.
+     *
+     * Modules call this rather than handing their callback types here, so the
+     * dependency stays one-way and the host never has to know what a module's
+     * callbacks look like.
      */
-    Gl.FrameCallback guard(final Gl.FrameCallback inner) {
-        if (inner == null) return null;
-        return seconds -> {
-            if (plugin == null) return;
-            try {
-                inner.frame(seconds);
-            } catch (Throwable t) {
-                fail("frame", t);
-            }
-        };
+    public void failed(String where, Throwable t) {
+        fail(where, t);
     }
 
-    String command(String line) {
+    public String command(String line) {
         Plugin p = plugin;
         if (p == null) return null;
         try {
@@ -142,22 +139,22 @@ final class PluginLoader {
     }
 
     /** UI thread. Attaches a freshly loaded plugin, replacing any predecessor. */
-    ShaderServer.Result attach(Plugin fresh, String name) {
+    public PushServer.Result attach(Plugin fresh, String name) {
         drop();
         try {
             fresh.attach(host);
         } catch (Throwable t) {
             note("attach failed: " + t);
-            return new ShaderServer.Result(false, "attach failed: " + t + "\n");
+            return new PushServer.Result(false, "attach failed: " + t + "\n");
         }
         plugin = fresh;
         label = name;
         note("attached " + name);
-        return new ShaderServer.Result(true, "attached " + name + "\n");
+        return new PushServer.Result(true, "attached " + name + "\n");
     }
 
     /** UI thread. Detaches the current plugin, if any. */
-    void drop() {
+    public void drop() {
         Plugin p = plugin;
         plugin = null;
         if (p == null) {
@@ -199,7 +196,7 @@ final class PluginLoader {
      *
      * @throws Exception with a message worth showing the user
      */
-    Plugin load(byte[] dex, String className) throws Exception {
+    public Plugin load(byte[] dex, String className) throws Exception {
         if (dex.length == 0) throw new IOException("empty dex");
 
         // A fresh filename every time. DexClassLoader caches its optimised
@@ -252,7 +249,7 @@ final class PluginLoader {
     }
 
     /** Reload the last good plugin at startup, unless the guard says not to. */
-    Plugin restore() {
+    public Plugin restore() {
         File pointer = pointerFile();
         if (!pointer.isFile()) return null;
 
@@ -280,13 +277,13 @@ final class PluginLoader {
     }
 
     /** Forget the plugin entirely, so nothing is reloaded at next launch. */
-    void forget() {
+    public void forget() {
         pointerFile().delete();
         disarmFile().delete();
         armed = false;
     }
 
-    String labelFor(String className) {
+    public String labelFor(String className) {
         int dot = className.lastIndexOf('.');
         return dot < 0 ? className : className.substring(dot + 1);
     }

@@ -1,4 +1,4 @@
-package dev.aarstad.shader;
+package dev.aarstad.shader.gl;
 
 import android.content.Context;
 import android.content.res.AssetManager;
@@ -26,7 +26,7 @@ import java.util.List;
  * supplies u_res, u_time, centred() and palette(). That is what lets the
  * renderer swap between presets without special-casing any of them.
  */
-final class Presets {
+public final class Presets {
 
     /** Name plus the *body* of the shader -- head is prepended at compile time. */
     static final class Preset {

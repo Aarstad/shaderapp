@@ -1,7 +1,9 @@
-package dev.aarstad.shader;
+package dev.aarstad.shader.host;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -10,23 +12,28 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.UnknownHostException;
+import java.util.Arrays;
 
 /**
- * A deliberately small HTTP server, bound to loopback only, that accepts shader
- * source and hands it to the renderer to compile in place.
+ * A deliberately small HTTP server, bound to loopback only, that accepts code,
+ * data and commands for the running app.
  *
- * This is the whole point of the app's update story: an APK can't replace
- * itself without the package installer prompting, but GLSL is just text that
- * the driver compiles at runtime. So the APK ships a loader, and iteration
- * happens by POSTing source into the running process -- no reinstall, no
- * prompt, and the shader changes without the app restarting.
+ * This is the app's whole update story. An APK can't replace itself without the
+ * package installer prompting, but a dex can be loaded at runtime and files can
+ * be written at runtime -- so the APK ships a host, and iteration happens by
+ * POSTing into the running process. No reinstall, no prompt, and the app does
+ * not restart.
+ *
+ * Nothing here knows what the app draws. Core routes cover the plugin, the
+ * command channel and plugin-visible files; anything app-specific arrives
+ * through {@link Extra}, which the shader module uses for its preset routes.
  *
  * It listens on 127.0.0.1, so only code already on this device can reach it,
- * and it only runs while the activity is in the foreground. That is the right
- * amount of exposure for a development channel: any app on the device could
- * post to it, but the worst it can do is draw something.
+ * and only while the activity is in the foreground. Any app on the device could
+ * post to it -- the right trade for a development channel, and the reason it
+ * closes the moment the app leaves the foreground.
  */
-final class ShaderServer implements Runnable {
+public final class PushServer implements Runnable {
 
     /** First port tried; push.sh probes this range upwards to find us. */
     static final int PORT_BASE = 8777;
@@ -35,54 +42,57 @@ final class ShaderServer implements Runnable {
     private static final int MAX_BODY = 4 * 1024 * 1024;
     private static final int READ_TIMEOUT_MS = 5000;
 
-    /** Outcome of a compile attempt on the GL thread. */
-    static final class Result {
-        final boolean ok;
-        final String log;
+    /** A reply, and the status it should go back with. */
+    public static final class Result {
+        public final boolean ok;
+        public final String log;
+        public final int status;
 
-        Result(boolean ok, String log) {
+        public Result(boolean ok, String log) {
+            this(ok, log, ok ? 200 : 400);
+        }
+
+        public Result(boolean ok, String log, int status) {
             this.ok = ok;
             this.log = log == null ? "" : log;
+            this.status = status;
         }
     }
 
+    /** App-specific routes, bolted on without the server knowing what they mean. */
+    public interface Extra {
+        /** @return a reply, or null to fall through to the 404 help text */
+        Result handle(String method, String path, byte[] body);
+
+        /** Lines for the 404 help, describing what this adds. */
+        String help();
+    }
+
     /** What the server is allowed to ask of the running app. */
-    interface Bridge {
-        /** Compiles and swaps in a shader. Blocks until the GL thread answers. */
-        Result install(String name, String body);
-
-        /** Drops a pushed shader, restoring the built-in. */
-        Result revert(String name);
-
-        /** Switches the displayed preset by name or index. */
-        Result select(String which);
-
-        /** Names in cycle order, current one marked. */
-        String describe();
-
-        /** Loads a pushed dex and attaches the plugin it contains. */
+    public interface Bridge {
         Result installPlugin(byte[] dex, String className);
-
-        /** Detaches the plugin and stops reloading it at launch. */
         Result dropPlugin();
-
-        /** One line describing the plugin, plus its recent log. */
         String pluginStatus();
-
-        /** Free text through to the plugin's command(). */
         Result command(String line);
+
+        /** Where POST /file writes; also what a plugin sees as its data dir. */
+        File dataDir();
+
+        /** Extra lines for /health, or "". */
+        String info();
+
+        /** App-specific routes, or null. */
+        Extra extra();
     }
 
     private final Bridge bridge;
-    private final int headLines;
     private final String version;
     private volatile ServerSocket socket;
     private volatile boolean running;
     private Thread thread;
 
-    ShaderServer(Bridge bridge, int headLines, String version) {
+    public PushServer(Bridge bridge, String version) {
         this.bridge = bridge;
-        this.headLines = headLines;
         this.version = version;
     }
 
@@ -90,9 +100,9 @@ final class ShaderServer implements Runnable {
      * Loopback, but specifically the IPv4 one.
      *
      * InetAddress.getLoopbackAddress() hands back ::1 on any device with IPv6
-     * up, and a socket bound to ::1 will not accept the IPv4 connections that
-     * a client aimed at 127.0.0.1 makes -- it just reads as "connection
-     * refused", which looks exactly like the app not running.
+     * up, and a socket bound to ::1 will not accept the IPv4 connections that a
+     * client aimed at 127.0.0.1 makes -- it just reads as "connection refused",
+     * which looks exactly like the app not running.
      */
     private static InetAddress loopback() {
         try {
@@ -102,8 +112,24 @@ final class ShaderServer implements Runnable {
         }
     }
 
+    /**
+     * Names are used as filenames and echoed into responses, so only this
+     * shape is accepted -- no dots, no separators, nothing that traverses.
+     */
+    public static boolean validName(String name) {
+        if (name == null || name.isEmpty() || name.length() > 64) return false;
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+            if (!ok) return false;
+        }
+        // A leading dot, or any "..", would climb out of the directory.
+        return !name.startsWith(".") && !name.contains("..");
+    }
+
     /** @return the bound port, or -1 if every candidate was taken. */
-    int start() {
+    public int start() {
         InetAddress loopback = loopback();
         for (int i = 0; i < PORT_TRIES; i++) {
             try {
@@ -112,7 +138,7 @@ final class ShaderServer implements Runnable {
                 continue;
             }
             running = true;
-            thread = new Thread(this, "shader-server");
+            thread = new Thread(this, "push-server");
             thread.setDaemon(true);
             thread.start();
             return PORT_BASE + i;
@@ -120,7 +146,7 @@ final class ShaderServer implements Runnable {
         return -1;
     }
 
-    void stop() {
+    public void stop() {
         running = false;
         ServerSocket s = socket;
         if (s != null) {
@@ -192,7 +218,7 @@ final class ShaderServer implements Runnable {
             return;
         }
 
-        // Read as bytes throughout. Shader source is text, but a pushed dex is
+        // Read as bytes throughout. Most bodies are text, but a pushed dex is
         // binary and would not survive a round trip through a String.
         byte[] body = length > 0 ? readBody(in, length) : new byte[0];
         route(out, method, path, body, pluginClass);
@@ -203,12 +229,13 @@ final class ShaderServer implements Runnable {
         String body = raw.length == 0 ? "" : new String(raw, "UTF-8");
 
         if (path.equals("/health") && method.equals("GET")) {
-            respond(out, 200, "shader " + version
-                + "\nheadLines " + headLines
+            String info = bridge.info();
+            respond(out, 200, "app " + version
                 + "\n" + bridge.pluginStatus()
-                + "\n" + bridge.describe());
+                + (info == null || info.isEmpty() ? "" : "\n" + info));
             return;
         }
+
         if (path.equals("/plugin")) {
             if (method.equals("GET")) {
                 respond(out, 200, bridge.pluginStatus() + "\n");
@@ -219,8 +246,7 @@ final class ShaderServer implements Runnable {
                     respond(out, 400, "empty body -- nothing to load\n");
                     return;
                 }
-                Result r = bridge.installPlugin(raw, pluginClass);
-                respond(out, r.ok ? 200 : 400, r.log);
+                send(out, bridge.installPlugin(raw, pluginClass));
                 return;
             }
             if (method.equals("DELETE")) {
@@ -229,51 +255,92 @@ final class ShaderServer implements Runnable {
                 return;
             }
         }
+
         if (path.equals("/command") && method.equals("POST")) {
             Result r = bridge.command(body);
             respond(out, r.ok ? 200 : 404, r.log);
             return;
         }
-        if (path.equals("/presets") && method.equals("GET")) {
-            respond(out, 200, bridge.describe());
+
+        // Files a plugin can read: push data, not just code.
+        if (path.equals("/files") && method.equals("GET")) {
+            send(out, listFiles());
             return;
         }
-        if (path.startsWith("/preset/")) {
-            String name = decode(path.substring("/preset/".length()));
-            if (!Presets.validName(name)) {
-                respond(out, 400, "bad preset name: letters, digits, _ and - only\n");
+        if (path.startsWith("/file/")) {
+            String name = decode(path.substring("/file/".length()));
+            if (!validName(name)) {
+                respond(out, 400, "bad file name: letters, digits, _ - . only\n");
                 return;
             }
             if (method.equals("POST") || method.equals("PUT")) {
-                if (body.trim().isEmpty()) {
-                    respond(out, 400, "empty body -- nothing to compile\n");
-                    return;
-                }
-                Result r = bridge.install(name, body);
-                respond(out, r.ok ? 200 : 400, r.log);
+                send(out, writeFile(name, raw));
                 return;
             }
             if (method.equals("DELETE")) {
-                Result r = bridge.revert(name);
-                respond(out, r.ok ? 200 : 404, r.log);
+                boolean gone = new File(bridge.dataDir(), name).delete();
+                respond(out, gone ? 200 : 404,
+                    gone ? "deleted " + name + "\n" : "no such file: " + name + "\n");
                 return;
             }
         }
-        if (path.startsWith("/select/") && method.equals("POST")) {
-            Result r = bridge.select(decode(path.substring("/select/".length())));
-            respond(out, r.ok ? 200 : 404, r.log);
-            return;
+
+        Extra extra = bridge.extra();
+        if (extra != null) {
+            Result r = extra.handle(method, path, raw);
+            if (r != null) {
+                send(out, r);
+                return;
+            }
         }
+
         respond(out, 404, "no such endpoint\n\n"
             + "GET    /health\n"
-            + "GET    /presets\n"
-            + "POST   /preset/<Name>   body: fragment shader source\n"
-            + "DELETE /preset/<Name>   revert to the built-in\n"
-            + "POST   /select/<Name>   switch the displayed preset\n"
             + "GET    /plugin          plugin status and recent log\n"
             + "POST   /plugin          body: a dex file; X-Plugin-Class optional\n"
             + "DELETE /plugin          detach it\n"
-            + "POST   /command         body: free text for the plugin\n");
+            + "POST   /command         body: free text for the plugin\n"
+            + "GET    /files           list files the plugin can read\n"
+            + "POST   /file/<name>     body: anything; lands in the plugin's data dir\n"
+            + "DELETE /file/<name>     remove it\n"
+            + (extra == null ? "" : extra.help()));
+    }
+
+    private Result listFiles() {
+        File[] all = bridge.dataDir().listFiles();
+        if (all == null || all.length == 0) return new Result(true, "no files\n");
+        Arrays.sort(all, (a, b) -> a.getName().compareTo(b.getName()));
+        StringBuilder sb = new StringBuilder();
+        for (File f : all) {
+            sb.append(String.format("%8d  %s%n", f.length(), f.getName()));
+        }
+        return new Result(true, sb.toString());
+    }
+
+    private Result writeFile(String name, byte[] data) {
+        File dir = bridge.dataDir();
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return new Result(false, "could not create " + dir + "\n", 500);
+        }
+        // Write then rename, so a plugin can never read a half-written file.
+        File tmp = new File(dir, name + ".part");
+        try {
+            FileOutputStream os = new FileOutputStream(tmp);
+            try {
+                os.write(data);
+            } finally {
+                os.close();
+            }
+            File dest = new File(dir, name);
+            if (!tmp.renameTo(dest)) {
+                tmp.delete();
+                return new Result(false, "could not write " + name + "\n", 500);
+            }
+        } catch (IOException e) {
+            tmp.delete();
+            return new Result(false, "write failed: " + e + "\n", 500);
+        }
+        return new Result(true, "wrote " + data.length + " bytes to " + name + "\n");
     }
 
     private static String decode(String s) {
@@ -306,9 +373,11 @@ final class ShaderServer implements Runnable {
             read += n;
         }
         if (read == length) return data;
-        byte[] cut = new byte[read];
-        System.arraycopy(data, 0, cut, 0, read);
-        return cut;
+        return Arrays.copyOf(data, read);
+    }
+
+    private static void send(OutputStream out, Result r) throws IOException {
+        respond(out, r.status, r.log);
     }
 
     private static void respond(OutputStream out, int code, String body) throws IOException {
@@ -328,6 +397,7 @@ final class ShaderServer implements Runnable {
             case 400: return "Bad Request";
             case 404: return "Not Found";
             case 413: return "Payload Too Large";
+            case 500: return "Internal Server Error";
             case 503: return "Service Unavailable";
             default:  return "Status";
         }

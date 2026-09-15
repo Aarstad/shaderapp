@@ -1,8 +1,9 @@
-package dev.aarstad.shader;
+package dev.aarstad.shader.gl;
+
 
 /**
  * The "gl" host extension -- what a plugin gets from
- * {@link Plugin.Host#extension} when the app is drawing shaders.
+ * {@link dev.aarstad.shader.host.Plugin.Host#extension} when the app is drawing shaders.
  *
  * Kept out of {@link Plugin} on purpose. A plugin that only wants to put views
  * on screen should not have to know this exists, and a future host that draws

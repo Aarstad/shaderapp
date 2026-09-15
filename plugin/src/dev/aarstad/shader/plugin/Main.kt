@@ -10,8 +10,10 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 
-import dev.aarstad.shader.Gl
-import dev.aarstad.shader.Plugin
+import dev.aarstad.shader.gl.Gl
+import dev.aarstad.shader.host.Plugin
+import dev.aarstad.shader.host.PluginScreen
+import dev.aarstad.shader.host.PluginService
 
 /**
  * The example plugin: everything here is pushed as dex, so any of it changes
@@ -178,6 +180,32 @@ class Main : Plugin {
             false
         }
 
+        // The spare activity handed us its container to fill.
+        Plugin.SCREEN_OPEN -> {
+            val root = args[0] as ViewGroup
+            val ctx = host.activity()
+            root.addView(TextView(ctx).apply {
+                text = "second screen, built by pushed code\n\n" +
+                    "swap #${host.state().getInt("swaps")}\n" +
+                    "files: ${host.dataDir().list()?.size ?: 0}"
+                setPadding(48, 96, 48, 48)
+                setTextColor(0xFFFFFFFF.toInt())
+                setBackgroundColor(0xFF101014.toInt())
+                textSize = 16f
+            })
+            true
+        }
+
+        Plugin.SERVICE_START -> {
+            host.log("service started: ${args.getOrNull(0)}")
+            true
+        }
+
+        Plugin.SERVICE_STOP -> {
+            host.log("service stopped")
+            true
+        }
+
         // Unknown names must be ignored, so a plugin keeps working against a
         // host that sends more than it knows about.
         else -> false
@@ -189,6 +217,25 @@ class Main : Plugin {
         val args = parts.drop(1)
 
         return when (verb) {
+            "screen" -> {
+                host.post { PluginScreen.open(host.activity()) }
+                "opening the second screen"
+            }
+
+            "service" -> {
+                val on = args.firstOrNull() != "off"
+                host.post {
+                    if (on) PluginService.start(host.activity(), "touchwarp")
+                    else PluginService.stop(host.activity())
+                }
+                "service ${if (on) "on" else "off"}"
+            }
+
+            "files" -> host.dataDir().listFiles()
+                ?.joinToString("\n") { "${it.length()}  ${it.name}" }
+                ?.ifEmpty { "no files" }
+                ?: "no files"
+
             "ui" -> {
                 val p = panel ?: return "no panel"
                 val show = args.firstOrNull() != "off"
@@ -235,7 +282,8 @@ class Main : Plugin {
                 "decay $decay  cycle ${describeCycle()}  " +
                 "panel=${if (panel?.visibility == View.VISIBLE) "shown" else "hidden"}"
 
-            else -> "commands: ui on|off, cycle <s>|off, decay <n>, burst [x y], status"
+            else -> "commands: ui on|off, cycle <s>|off, decay <n>, burst [x y], " +
+                "screen, service on|off, files, status"
         }
     }
 

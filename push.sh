@@ -15,6 +15,9 @@
 #   ./push.sh -i                            plugin status and recent log
 #   ./push.sh -P                            detach the plugin
 #
+#   ./push.sh -f data.json                  push a file into the plugin's data dir
+#   ./push.sh -F                            list those files
+#
 # The preset name is the filename without .frag. A name the app has never seen
 # is appended to the cycle, so new presets need no reinstall either.
 set -uo pipefail
@@ -97,6 +100,12 @@ push_file() {
 case "${1:-}" in
   -l|--list)   request GET  /presets ;;
   -i|--info)   request GET  /plugin ;;
+  -F|--files)  request GET  /files ;;
+  -f|--file)
+    [ $# -ge 2 ] || die "usage: push.sh -f <file> [name]"
+    [ -f "$2" ] || die "no such file: $2"
+    name=${3:-$(command basename "$2")}
+    request POST "/file/$name" "$2" ;;
   -P|--drop-plugin) request DELETE /plugin ;;
   -c|--command)
     [ $# -ge 2 ] || die "usage: push.sh -c '<text>'"
@@ -137,7 +146,7 @@ case "${1:-}" in
     done
     ;;
   ""|-h|--help)
-    command sed -n '4,20p' "$0" | command sed 's/^# \{0,1\}//'
+    command sed -n '4,25p' "$0" | command sed 's/^# \{0,1\}//'
     echo
     echo "app is at $BASE"
     ;;

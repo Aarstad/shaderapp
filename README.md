@@ -17,6 +17,9 @@ Package: `dev.aarstad.shader`
 | Ripple | Radial wave, damped with distance |
 | Touch | Follows `u_touch`/`u_pulse` from the plugin; centres itself without one |
 
+The app reopens on whichever preset it was last left on, stored by name since
+the cycle can gain or lose presets between launches.
+
 ## Live shader push
 
 Shaders are not baked into the code. The APK ships a *loader*, and shader
@@ -76,6 +79,9 @@ upward and toasts it at startup; `push.sh` probes that range to find it.
 | `POST /plugin` | body is a dex file; `X-Plugin-Class` optional |
 | `DELETE /plugin` | detach it |
 | `POST /command` | body is free text for the plugin |
+| `GET /files` | list files the plugin can read |
+| `POST /file/<name>` | body is anything; lands in the plugin's data dir |
+| `DELETE /file/<name>` | remove it |
 
 Loopback-bound means only code already on this device can reach it. Any app on
 the phone could post to it, and the worst it can do is draw something -- that is
@@ -103,6 +109,8 @@ pushed:
     ./push.sh -c 'status'     send free text to the plugin
     ./push.sh -i              status and recent log
     ./push.sh -P              detach it
+    ./push.sh -f data.json    push a file into the plugin's data dir
+    ./push.sh -F              list those files
 
 A plugin is a class `dev.aarstad.shader.plugin.Main` with a no-argument
 constructor (override with the `X-Plugin-Class` header).
@@ -168,6 +176,50 @@ The manifest. Activities, permissions, services, the app name and icon are
 fixed at install, and no push changes them. Which is a templating problem
 rather than a framework one: declare the permissions and components you might
 plausibly want up front, and most later ideas need no reinstall at all.
+
+### Layout
+
+    src/host/   dev.aarstad.shader.host    the template; knows nothing about shaders
+    src/gl/     dev.aarstad.shader.gl      the optional shader module
+
+The dependency runs one way only: grep the host package for GL and it comes
+back empty. To get the bare template, point the manifest's launcher at
+`.host.HostActivity` and delete `src/gl` -- one line and one directory, leaving
+an app that is nothing but a plugin container.
+
+Enforcing that shaped two things. `PushServer` has no idea what a preset is;
+app-specific routes arrive through a `PushServer.Extra` the module supplies.
+And `PluginLoader` cannot hold a frame callback, because that type belongs to
+the module, so it exposes `failed(where, throwable)` instead and modules report
+throws rather than handing their callback types to the host.
+
+### The manifest is the other frozen thing
+
+A push changes code, never the manifest, so anything declared there has to be
+declared before it is wanted. Two components are therefore present and
+implemented rather than merely listed:
+
+| | |
+|---|---|
+| `PluginScreen` | a spare activity; hands its container to the plugin on `SCREEN_OPEN` and closes itself if the plugin returns false |
+| `PluginService` | a foreground service; keeps the process alive and sends `SERVICE_START` / `SERVICE_STOP` |
+
+Permissions got the same treatment, with one lesson attached. Declaring
+`CAMERA`, `RECORD_AUDIO` and `READ_MEDIA_*` up front made the build refuse to
+install on MagicOS: a sideload that suddenly asks for camera, microphone and
+media access is exactly what a device-side risk scan exists to stop. They are
+commented out in the manifest, to be uncommented with a `versionCode` bump the
+day something needs them. An app that will not install is worse than one that
+needs a reinstall later.
+
+What is left declares nothing the install prompt shows: `INTERNET`,
+`ACCESS_NETWORK_STATE`, `WAKE_LOCK`, `VIBRATE`, `POST_NOTIFICATIONS`,
+`FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC`.
+
+**Still missing: a FileProvider.** Sharing a file *out* to another app needs a
+content provider, and the standard one is AndroidX. Adding it later costs a
+reinstall. It is the one component that was not front-loaded, for want of
+wanting to hand-write and ship an untested provider.
 
 ### Not crashing
 
