@@ -137,75 +137,57 @@ but loaded classes are collected only once nothing references them, and the
 runtime is conservative. A few KB per swap on a development channel is a fair
 price for not restarting.
 
-### Building a plugin
-
-`./build-plugin.sh` runs in the container, compiling `plugin/src` against
-`build/classes` so `Plugin` resolves to the same class the app holds, then dexes
-only the plugin's own classes. Run `./build.sh` first -- it links against its
-output. `./push.sh -p` does both.
-
-Android 14+ refuses to load a dex file that is still writable, so the pushed
-dex is written, `setReadOnly()`, then loaded; each push gets a fresh filename
-because `DexClassLoader` caches optimised output against the path.
-
-## How it draws
-
-`MainActivity` puts a `GLSurfaceView` in continuous render mode and keeps the
-screen on. `PresetRenderer` draws a single fullscreen triangle (cheaper than a
-quad, and it needs no index buffer); all the work happens in the fragment
-shader.
-
-Every shader is GLSL ES 1.00 and takes the same two uniforms -- `u_res` in
-pixels and `u_time` in seconds -- so the draw path never special-cases one.
-They share `_head.glsl`, a preamble providing `centred()` (an aspect-corrected
-uv in [-1,1]) and `palette()` (the cosine palette). Programs are compiled at
-surface creation and swapped by index, so cycling costs nothing at the tap.
-
-`u_time` is continuous across switches -- presets don't restart when you tap.
-
-A push compiles and links the new program to completion *before* replacing
-anything, so a broken shader can't interrupt what's on screen. If a shader that
-was saved earlier stops compiling -- a different driver, or a context loss after
-a bad save -- it falls back to a red test pattern rather than crashing at
-launch, and `push.sh -l` marks it.
-
-These target a mid-range Mali at 1080p/60. Loop counts are the knob to turn
-first if a preset drops frames.
-
-## Where shaders live
-
-    assets/shaders/_head.glsl     shared preamble, prepended to every shader
-    assets/shaders/order.txt      cycle order for the built-ins
-    assets/shaders/<Name>.frag    one shader per preset
-
-Those are packaged into the APK as assets. At runtime the app overlays anything
-pushed (in `getFilesDir()/presets/`) on top, matching by name.
-
-Preset names are used as filenames and echoed into HTTP responses, so they are
-restricted to letters, digits, `_` and `-`.
-
-To make a pushed shader permanent, save it under `assets/shaders/`, add the
-name to `order.txt`, rebuild, and `./push.sh -r <Name>` to clear the overlay
-copy that would otherwise keep shadowing it.
-
-## Building
+### Building
 
 `build.sh` runs the whole APK pipeline by hand:
 
-    aapt -> javac -> dalvik-exchange (dx) -> aapt add -> zipalign -> apksigner
+    aapt -> javac -> d8 -> zipalign -> apksigner
 
-**This does not build under native Termux.** It needs Debian's `android-sdk`
-packages -- `aapt`, `dalvik-exchange`, `zipalign`, `apksigner`, and
-`/usr/lib/android-sdk/platforms/android-23/android.jar` -- none of which are in
-the Termux repos. Build it inside the proot Ubuntu container:
+**This does not build under native Termux**, but it does build on the phone --
+inside the proot Ubuntu container:
 
     proot-distro login ubuntu
-    cd /root/shaderapp && ./build.sh
+    cd /mnt/shaderapp && ./tools/setup-sdk.sh   # once
+    ./build.sh
 
-Adjust `ANDROID_JAR` at the top of `build.sh` if the SDK lives elsewhere.
+The reason the whole thing is possible on an ARM phone at all is `aapt`.
+Google ships the resource compiler as an x86_64-only native binary, which is
+normally what stops Android builds working here -- but Debian builds its
+`android-sdk` packages from source for every architecture, so `aapt`,
+`zipalign` and `apksigner` are all native aarch64 already.
 
-Avoid lambdas and other Java 8+ desugaring: `dalvik-exchange` is classic `dx`
-and does not handle `invokedynamic`. Anonymous inner classes only.
+`tools/setup-sdk.sh` fetches the two pieces Debian doesn't ship, into
+`/opt/shader-sdk`:
+
+| | |
+|---|---|
+| `d8.jar` | the dexer, out of build-tools 37 |
+| `android-34.jar` | the compile classpath |
+
+Both are architecture independent -- `d8` is a self-contained Java jar and
+`android.jar` is a classpath stub -- so neither cares that this is an ARM
+phone. Only those two files are kept; the rest of build-tools is x86_64 native
+binaries that would not run here.
+
+**Use build-tools 37, not 34.** The `d8` in 34 (8.2.2-dev) dies with a
+`NullPointerException` while writing the dex on this container's JDK 25. It is
+not a class file version problem -- it fails on Java 8 bytecode just the same.
+37 ships d8 9.2.4-dev, which is fine. d8 rejects class file major version 65,
+so `--release 21` is out; the build uses 17.
+
+This replaced Debian's `dalvik-exchange` (classic `dx`) and `android-23.jar`.
+Two things that cost, and no longer do:
+
+- `dx` predates `invokedynamic`, so every callback had to be an anonymous inner
+  class. Lambdas work now.
+- Compiling against API 23 meant anything newer went in by reflection -- the
+  display-cutout code was a `getField().setInt()`. It is an ordinary assignment
+  now, still guarded on `SDK_INT` because `minSdk` is 21.
+
+`setSystemUiVisibility` stays, and javac warns about it. Its replacement,
+`WindowInsetsController`, arrived in API 30, and the old flags still work
+because the app targets SDK 34 -- Android 15+ only ignores them above 34.
+Raising `targetSdk` means switching, and that is the change to make together.
 
 ## Installing
 

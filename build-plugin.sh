@@ -8,7 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ANDROID_JAR=/usr/lib/android-sdk/platforms/android-23/android.jar
+SDK=${SDK:-/opt/shader-sdk}
+ANDROID_JAR="$SDK/android-34.jar"
+D8_JAR="$SDK/d8.jar"
 OUT=plugin/build
 
 if [ ! -d build/classes ]; then
@@ -20,12 +22,18 @@ rm -rf "$OUT"
 mkdir -p "$OUT/classes"
 
 echo "[1/2] javac"
-javac --release 8 -nowarn -Xlint:-options \
+javac --release 17 -nowarn -Xlint:-options \
   -classpath "$ANDROID_JAR:build/classes" \
   -d "$OUT/classes" \
   $(find plugin/src -name '*.java')
 
-echo "[2/2] dx"
-dalvik-exchange --dex --output="$OUT/classes.dex" "$OUT/classes"
+echo "[2/2] d8"
+java -cp "$D8_JAR" com.android.tools.r8.D8 \
+  --release \
+  --min-api 21 \
+  --lib "$ANDROID_JAR" \
+  --classpath build/classes \
+  --output "$OUT" \
+  $(find "$OUT/classes" -name '*.class')
 
 ls -la "$OUT/classes.dex"

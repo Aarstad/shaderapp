@@ -123,19 +123,17 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
      * default policy letterboxes the window away from the cutout, which shows up
      * as a black band across the top.
      *
-     * LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES and the field it goes in both
-     * arrived in API 28, well after android-23, hence the reflection.
+     * This used to go in by reflection: the field and the constant both arrived
+     * in API 28 and the build compiled against android-23. Compiling against
+     * android-34 makes it an ordinary assignment, still guarded because minSdk
+     * is 21.
      */
     private void drawUnderCutout() {
-        if (Build.VERSION.SDK_INT < 28) return;
-        try {
-            WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.getClass().getField("layoutInDisplayCutoutMode").setInt(lp, 1);
-            getWindow().setAttributes(lp);
-        } catch (Exception e) {
-            // Vendor ROM without the field. The shader stops at the cutout
-            // instead of running under it -- not worth crashing over.
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return;
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        getWindow().setAttributes(lp);
     }
 
     @Override
@@ -187,10 +185,8 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         Toast.makeText(this, renderer.names().get(next), Toast.LENGTH_SHORT).show();
     }
 
-    private void show(final int i) {
-        view.queueEvent(new Runnable() {
-            @Override public void run() { renderer.select(i); }
-        });
+    private void show(int i) {
+        view.queueEvent(() -> renderer.select(i));
     }
 
     @Override protected void onPause() { super.onPause(); view.onPause(); }
@@ -212,15 +208,13 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             new AtomicReference<ShaderServer.Result>();
         final CountDownLatch done = new CountDownLatch(1);
 
-        view.queueEvent(new Runnable() {
-            @Override public void run() {
-                try {
-                    slot.set(task.run());
-                } catch (Throwable t) {
-                    slot.set(new ShaderServer.Result(false, "internal error: " + t + "\n"));
-                } finally {
-                    done.countDown();
-                }
+        view.queueEvent(() -> {
+            try {
+                slot.set(task.run());
+            } catch (Throwable t) {
+                slot.set(new ShaderServer.Result(false, "internal error: " + t + "\n"));
+            } finally {
+                done.countDown();
             }
         });
 
@@ -239,10 +233,8 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
     }
 
     @Override
-    public ShaderServer.Result install(final String name, final String body) {
-        ShaderServer.Result r = onGl(new GlTask() {
-            @Override public ShaderServer.Result run() { return renderer.install(name, body); }
-        });
+    public ShaderServer.Result install(String name, String body) {
+        ShaderServer.Result r = onGl(() -> renderer.install(name, body));
         if (!r.ok) return r;
 
         // Persist only what actually compiled, so a bad push can never be
@@ -266,13 +258,9 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             return new ShaderServer.Result(false, "nothing pushed under the name " + name + "\n");
         }
 
-        final String builtIn = Presets.builtInBody(this, name);
+        String builtIn = Presets.builtInBody(this, name);
         if (builtIn != null) {
-            ShaderServer.Result r = onGl(new GlTask() {
-                @Override public ShaderServer.Result run() {
-                    return renderer.install(name, builtIn);
-                }
-            });
+            ShaderServer.Result r = onGl(() -> renderer.install(name, builtIn));
             if (r.ok) {
                 toast("↺ " + name);
                 return new ShaderServer.Result(true, "reverted " + name + " to the built-in\n");
@@ -280,9 +268,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             return r;
         }
 
-        ShaderServer.Result r = onGl(new GlTask() {
-            @Override public ShaderServer.Result run() { return renderer.remove(name); }
-        });
+        ShaderServer.Result r = onGl(() -> renderer.remove(name));
         if (r.ok) toast("− " + name);
         return r;
     }
@@ -338,11 +324,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             return new ShaderServer.Result(false, "load failed: " + t + "\n");
         }
 
-        ShaderServer.Result r = onGl(new GlTask() {
-            @Override public ShaderServer.Result run() {
-                return plugins.attach(fresh, plugins.labelFor(name));
-            }
-        });
+        ShaderServer.Result r = onGl(() -> plugins.attach(fresh, plugins.labelFor(name)));
         if (!r.ok) plugins.forget();
         else toast("\u21bb " + plugins.labelFor(name));
         return r;
@@ -354,11 +336,9 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             plugins.forget();
             return new ShaderServer.Result(false, "no plugin loaded\n");
         }
-        onGl(new GlTask() {
-            @Override public ShaderServer.Result run() {
-                plugins.drop();
-                return new ShaderServer.Result(true, "");
-            }
+        onGl(() -> {
+            plugins.drop();
+            return new ShaderServer.Result(true, "");
         });
         plugins.forget();
         toast("\u2212 plugin");
@@ -403,12 +383,8 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         @Override public float seconds() { return renderer.seconds(); }
     }
 
-    private void toast(final String text) {
-        runOnUiThread(new Runnable() {
-            @Override public void run() {
-                Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show();
-            }
-        });
+    private void toast(String text) {
+        runOnUiThread(() -> Toast.makeText(this, text, Toast.LENGTH_SHORT).show());
     }
 
     // ---- renderer ------------------------------------------------------------
