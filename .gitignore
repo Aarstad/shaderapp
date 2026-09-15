@@ -1,0 +1,6 @@
+build/
+*.apk
+*.idsig
+
+# Debug signing key. Kept out of git by default; see README.
+debug.keystore
