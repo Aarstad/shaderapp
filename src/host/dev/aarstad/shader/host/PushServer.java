@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
@@ -29,9 +30,9 @@ import java.util.Arrays;
  * through {@link Extra}, which the shader module uses for its preset routes.
  *
  * It listens on 127.0.0.1, so only code already on this device can reach it,
- * and only while the activity is in the foreground. Any app on the device could
- * post to it -- the right trade for a development channel, and the reason it
- * closes the moment the app leaves the foreground.
+ * and only while the activity exists. Any app on the device could post to it,
+ * and the worst it can do is drive the app you are already looking at -- the
+ * right trade for a development channel on a phone you own.
  */
 public final class PushServer implements Runnable {
 
@@ -133,7 +134,14 @@ public final class PushServer implements Runnable {
         InetAddress loopback = loopback();
         for (int i = 0; i < PORT_TRIES; i++) {
             try {
-                socket = new ServerSocket(PORT_BASE + i, 4, loopback);
+                // Bound in two steps so SO_REUSEADDR can be set first. An
+                // activity that gets recreated stops and restarts this within
+                // milliseconds, and without it the old socket's lingering bind
+                // would push the next one onto a different port.
+                ServerSocket s = new ServerSocket();
+                s.setReuseAddress(true);
+                s.bind(new InetSocketAddress(loopback, PORT_BASE + i), 4);
+                socket = s;
             } catch (IOException e) {
                 continue;
             }

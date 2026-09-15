@@ -36,6 +36,9 @@ class Main : Plugin {
     private var label: TextView? = null
     private var shownPreset = -1
 
+    /** Counts frame callbacks, so "is it drawing at all" is answerable. */
+    private var frames = 0
+
     /** Last touch, already in shader space. */
     private var tx = 0f
     private var ty = 0f
@@ -127,6 +130,7 @@ class Main : Plugin {
     /** GL thread, with the drawing program bound. */
     private fun frame(t: Float) {
         val g = gl ?: return
+        frames++
 
         g.setUniform("u_touch", tx, ty)
         g.setFloat("u_pulse", Math.exp(-maxOf(0f, t - tappedAt).toDouble() * decay).toFloat())
@@ -277,7 +281,8 @@ class Main : Plugin {
                 "burst at $tx,$ty"
             }
 
-            "status" -> "touchwarp/ui  swap #${host.state().getInt("swaps")}  " +
+            "status" -> "touchwarp/ui  seconds=${gl?.seconds()}  frames=$frames  " +
+                "swap #${host.state().getInt("swaps")}  " +
                 "gl=${gl != null}  touch $tx,$ty  down $down  " +
                 "decay $decay  cycle ${describeCycle()}  " +
                 "panel=${if (panel?.visibility == View.VISIBLE) "shown" else "hidden"}"

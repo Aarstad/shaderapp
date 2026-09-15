@@ -66,6 +66,18 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
     private volatile int index = 0;
     private volatile Gl.FrameCallback frameCallback;
 
+    /**
+     * Whether onSurfaceCreated has run, so there is a context and a program per
+     * preset.
+     *
+     * The activity can exist without one: the push channel now opens in
+     * onCreate, and GLSurfaceView drains its event queue even before a surface
+     * arrives -- so a queued compile really does run, with no context, and
+     * every GL call quietly fails. Without this check that surfaces as an empty
+     * 400 four milliseconds after the request, which says nothing at all.
+     */
+    private volatile boolean surfaceReady;
+
     private int width, height;
     private long startMs;
 
@@ -159,6 +171,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         }
         if (index >= progs.size()) index = 0;
         startMs = SystemClock.uptimeMillis();
+        surfaceReady = true;
     }
 
     @Override
@@ -210,6 +223,8 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
      * you keep looking at the last good version while you fix it.
      */
     PushServer.Result install(String name, String body) {
+        if (!surfaceReady) return noSurface();
+
         Prog fresh = build(body);
         if (fresh == null) {
             return new PushServer.Result(false, lastError);
@@ -236,6 +251,8 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
 
     /** Drop a preset that has no built-in to fall back to. GL thread only. */
     PushServer.Result remove(String name) {
+        if (!surfaceReady) return noSurface();
+
         int at = names.indexOf(name);
         if (at < 0) return new PushServer.Result(false, "no preset called " + name + "\n");
         if (progs.size() <= 1) {
@@ -249,6 +266,13 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         errors.remove(at);
         if (index >= progs.size()) index = progs.size() - 1;
         return new PushServer.Result(true, "removed " + name + "\n");
+    }
+
+    private static PushServer.Result noSurface() {
+        // 503 rather than 400: nothing is wrong with the shader, the app just
+        // has no drawing surface yet. Same status the GL-thread timeout uses.
+        return new PushServer.Result(false,
+            "no GL surface yet -- open the app so it is actually drawing, then push again\n", 503);
     }
 
     /** Set by build() when it returns null, read straight after. GL thread only. */
@@ -287,6 +311,12 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         p.uRes  = GLES20.glGetUniformLocation(program, "u_res");
         p.uTime = GLES20.glGetUniformLocation(program, "u_time");
         return p;
+    }
+
+    /** Drivers sometimes fail with no log at all, which reads as success gone quiet. */
+    private static String describe(String log, String stage) {
+        if (log != null && !log.trim().isEmpty()) return log;
+        return stage + " failed, and the driver returned no log\n";
     }
 
     private static int compileOrThrow(int type, String src) {

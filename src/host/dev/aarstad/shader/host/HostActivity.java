@@ -75,12 +75,17 @@ public class HostActivity extends Activity implements PushServer.Bridge {
             plugins.forget();
         }
 
+        startServer();
         goFullscreen();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (server != null) {
+            server.stop();
+            server = null;
+        }
         if (current == this) current = null;
     }
 
@@ -113,29 +118,28 @@ public class HostActivity extends Activity implements PushServer.Bridge {
     }
 
     /**
-     * The push channel only exists while the app is on screen. Anything posted
-     * to it has to reach the UI thread, and a backgrounded activity never
-     * drains it -- so rather than let pushes pile up invisibly, the socket
-     * closes with the activity and the client gets a refused connection it can
-     * report honestly.
+     * The push channel lives as long as the activity, not as long as it is on
+     * screen.
+     *
+     * It used to close in onStop, on the reasoning that a backgrounded activity
+     * cannot drain the UI thread. That was simply wrong: the main looper keeps
+     * running, so runOnUiThread works perfectly well in the background. Only
+     * the GL thread stops, because GLSurfaceView.onPause halts it -- so shader
+     * compiles genuinely need the foreground, and everything else does not.
+     *
+     * The old behaviour also broke the second screen, which backgrounds this
+     * activity and so cut the channel exactly when a plugin most wanted it.
+     *
+     * The cost is that the socket is open whenever the app is alive rather than
+     * only while you are looking at it. On loopback, on a phone you own, that
+     * is the better trade.
      */
-    @Override
-    protected void onStart() {
-        super.onStart();
+    private void startServer() {
         server = new PushServer(this, versionName());
         port = server.start();
         Toast.makeText(this,
             port > 0 ? "push: 127.0.0.1:" + port : "push channel unavailable (ports busy)",
             Toast.LENGTH_SHORT).show();
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        if (server != null) {
-            server.stop();
-            server = null;
-        }
     }
 
     protected String versionName() {
