@@ -141,6 +141,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         // A fresh context invalidates every program id we were holding.
         progs.clear();
         vs = compileOrThrow(GLES20.GL_VERTEX_SHADER, VERTEX_SRC);
+        lastVs = vs;
 
         for (int i = 0; i < bodies.size(); i++) {
             Prog p = build(bodies.get(i));
@@ -261,7 +262,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         int[] ok = new int[1];
         GLES20.glGetShaderiv(fs, GLES20.GL_COMPILE_STATUS, ok, 0);
         if (ok[0] == 0) {
-            lastError = GLES20.glGetShaderInfoLog(fs);
+            lastError = describe(GLES20.glGetShaderInfoLog(fs), "compile");
             GLES20.glDeleteShader(fs);
             return null;
         }
@@ -274,7 +275,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
 
         GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, ok, 0);
         if (ok[0] == 0) {
-            lastError = GLES20.glGetProgramInfoLog(program);
+            lastError = describe(GLES20.glGetProgramInfoLog(program), "link");
             GLES20.glDeleteProgram(program);
             return null;
         }
@@ -287,11 +288,19 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         return p;
     }
 
-    /** Drivers sometimes fail with no log at all, which reads as success gone quiet. */
+    /**
+     * A driver can fail with no log at all. Report the stage and whatever
+     * glGetError knows, so the reply is never blank.
+     */
     private static String describe(String log, String stage) {
         if (log != null && !log.trim().isEmpty()) return log;
-        return stage + " failed, and the driver returned no log\n";
+        return stage + " failed with no driver log; glGetError=0x"
+            + Integer.toHexString(GLES20.glGetError())
+            + " vs=" + lastVs + "\n";
     }
+
+    /** Set when the shared vertex shader is built; 0 means it never was. */
+    private static int lastVs;
 
     private static int compileOrThrow(int type, String src) {
         int s = GLES20.glCreateShader(type);
