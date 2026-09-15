@@ -11,27 +11,8 @@ import java.util.Deque;
 import dalvik.system.DexClassLoader;
 
 /**
- * Loads pushed dex, holds the live plugin, and makes sure a bad one can't take
- * the app with it.
- *
- * Every call into plugin code goes through here wrapped in a catch of
- * Throwable. A plugin that throws is logged, detached and forgotten, and the
- * app falls back to its built-in behaviour mid-frame.
- *
- * That covers a plugin that throws. It does not cover one that deadlocks the
- * UI thread or kills the process outright -- and since plugins reload at
- * launch, that is a crash loop. So loading is armed: a marker file is written
- * before a plugin first runs, and cleared only once the host has seen the UI
- * thread still running a couple of seconds after attach() returned. Finding
- * that marker at startup means the last attempt never got that far, so the
- * plugin is left disabled rather than loaded again. push.sh reports it, and
- * pushing again re-arms.
- *
- * Note that swapping a plugin leaks its predecessor's classes: the old
- * DexClassLoader is dropped, but loaded classes are only collected once
- * nothing references them, and the runtime is conservative about that. It is a
- * few KB per swap on a development channel, which is a fair trade for not
- * having to restart.
+ * Loads pushed dex, holds the live plugin, and makes sure a bad one can't
+ * take the app with it.
  */
 public final class PluginLoader {
 
@@ -71,11 +52,7 @@ public final class PluginLoader {
         return disarmFile().isFile() ? "plugin disabled after a failed load" : "plugin none";
     }
 
-    /**
-     * The host reporting that the UI thread is still alive well after attach.
-     * Anything that was going to deadlock or kill the process has had its
-     * chance, so stop holding the load against the plugin at next launch.
-     */
+    /** The host reporting that the UI thread is still alive well after attach. */
     public void proved() {
         if (!armed || plugin == null) return;
         armed = false;
@@ -98,8 +75,6 @@ public final class PluginLoader {
     }
 
     // ---- dispatch ------------------------------------------------------------
-    //
-    // Each of these is a no-op when no plugin is loaded, so callers don't branch.
 
     public boolean event(String name, Object... args) {
         Plugin p = plugin;
@@ -113,14 +88,8 @@ public final class PluginLoader {
     }
 
     /**
-     * Report a throw out of plugin code that this class did not call itself --
-     * a callback the plugin registered with some module, for instance. Same
-     * consequence as any other: logged, detached, dropped from the reload
-     * pointer.
-     *
-     * Modules call this rather than handing their callback types here, so the
-     * dependency stays one-way and the host never has to know what a module's
-     * callbacks look like.
+     * Report a throw out of plugin code that this class did not call itself -- a
+     * callback the plugin registered with some module, for instance.
      */
     public void failed(String where, Throwable t) {
         fail(where, t);
@@ -165,8 +134,7 @@ public final class PluginLoader {
         } catch (Throwable t) {
             note("detach threw: " + t);
         } finally {
-            // Runs even if the plugin's own cleanup threw -- the container and
-            // the frame callback are the host's to reclaim either way.
+            // Runs even if the plugin's own cleanup threw -- the container and the frame callback are the host's to reclaim either way.
             cleanup.run();
         }
     }
@@ -190,17 +158,11 @@ public final class PluginLoader {
     private File pointerFile() { return new File(dir(), "current"); }
     private File disarmFile()  { return new File(dir(), "armed"); }
 
-    /**
-     * Writes the dex and loads its entry class. Off the GL thread -- the caller
-     * attaches the result there.
-     *
-     * @throws Exception with a message worth showing the user
-     */
+    /** Writes the dex and loads its entry class. */
     public Plugin load(byte[] dex, String className) throws Exception {
         if (dex.length == 0) throw new IOException("empty dex");
 
-        // A fresh filename every time. DexClassLoader caches its optimised
-        // output against the path, and reusing one invites a stale hit.
+        // A fresh filename every time.
         File file = new File(dir(), "plugin-" + System.currentTimeMillis() + ".dex");
         FileOutputStream os = new FileOutputStream(file);
         try {
@@ -229,9 +191,7 @@ public final class PluginLoader {
         File odex = new File(dir(), "oat");
         if (!odex.isDirectory()) odex.mkdirs();
 
-        // Parent is the app's own loader, so Plugin and Plugin.Host resolve to
-        // the very same classes the app is holding -- which is the whole reason
-        // the cast below is legal across a classloader boundary.
+        // Parent is the app's own loader, so Plugin and Plugin.Host resolve to the very same classes the app is holding -- which is the whole reason the cast below is legal across a classloader boundary.
         DexClassLoader loader = new DexClassLoader(
             dex.getAbsolutePath(), odex.getAbsolutePath(), null,
             PluginLoader.class.getClassLoader());

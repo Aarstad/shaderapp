@@ -18,12 +18,6 @@ import dev.aarstad.shader.host.PluginService
 /**
  * The example plugin: everything here is pushed as dex, so any of it changes
  * without a reinstall.
- *
- * It exists to show the contract is not shader-shaped. It builds a real Android
- * view hierarchy in the container the host hands it, handles back, and keeps a
- * counter across swaps -- none of which involves GL. The shader work happens
- * through the optional "gl" extension, and the null check around it is the
- * point: this same class would load and run in a host that draws nothing.
  */
 class Main : Plugin {
 
@@ -53,8 +47,7 @@ class Main : Plugin {
         host = h
         gl = h.extension("gl") as? Gl
 
-        // Survives a swap: the host holds it, not this instance, so it counts
-        // every push rather than resetting to 1 each time.
+        // Survives a swap: the host holds it, not this instance, so it counts every push rather than resetting to 1 each time.
         val swaps = host.state().getInt("swaps") + 1
         host.state().putInt("swaps", swaps)
 
@@ -66,8 +59,7 @@ class Main : Plugin {
     }
 
     override fun detach() {
-        // The host empties the container and drops the frame callback itself,
-        // so there is nothing to undo here beyond letting go.
+        // The host empties the container and drops the frame callback itself, so there is nothing to undo here beyond letting go.
         panel = null
         label = null
         host.log("touchwarp/ui down")
@@ -142,8 +134,7 @@ class Main : Plugin {
             if (n > 0) g.select((g.currentPreset() + 1) % n)
         }
 
-        // Only touch the UI when the preset actually changed -- this runs 60
-        // times a second and the label does not.
+        // Only touch the UI when the preset actually changed -- this runs 60 times a second and the label does not.
         val current = g.currentPreset()
         if (current != shownPreset) {
             shownPreset = current
@@ -167,8 +158,7 @@ class Main : Plugin {
             false
         }
 
-        // First back press hides the panel; a second one leaves the app, which
-        // is what returning false asks the host to do.
+        // First back press hides the panel; a second one leaves the app, which is what returning false asks the host to do.
         Plugin.BACK -> {
             val p = panel
             if (p != null && p.visibility == View.VISIBLE) {
@@ -210,8 +200,7 @@ class Main : Plugin {
             true
         }
 
-        // Unknown names must be ignored, so a plugin keeps working against a
-        // host that sends more than it knows about.
+        // Unknown names must be ignored, so a plugin keeps working against a host that sends more than it knows about.
         else -> false
     }
 

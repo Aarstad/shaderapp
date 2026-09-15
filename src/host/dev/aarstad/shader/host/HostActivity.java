@@ -16,25 +16,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-/**
- * Everything an app needs to host pushed code, and nothing about what it draws.
- *
- * Subclass it, optionally return a background view from
- * {@link #onCreateBackground}, and optionally offer capabilities through
- * {@link #extension} and routes through {@link #extra}. The shader module does
- * exactly that; delete it and this still runs, showing whatever the plugin
- * builds in its container.
- */
+/** Everything an app needs to host pushed code, and nothing about what it draws. */
 public class HostActivity extends Activity implements PushServer.Bridge {
 
     /** How long a plugin must keep the UI thread alive before the load counts as proven. */
     private static final long PROVEN_AFTER_MS = 2000;
 
-    /**
-     * The running host, so a second activity or a service can reach the same
-     * plugin. Single-activity app, so a plain static is honest; it is cleared
-     * in onDestroy rather than leaked.
-     */
+    /** The running host, so a second activity or a service can reach the same plugin. */
     private static volatile HostActivity current;
 
     public static HostActivity current() { return current; }
@@ -71,7 +59,6 @@ public class HostActivity extends Activity implements PushServer.Bridge {
         Plugin restored = plugins.restore();
         if (restored != null && !attach(restored, "restored").ok) {
             // Most likely a plugin built against an older Plugin interface.
-            // Whatever the reason, it will fail the same way next launch.
             plugins.forget();
         }
 
@@ -99,11 +86,7 @@ public class HostActivity extends Activity implements PushServer.Bridge {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
     }
 
-    /**
-     * Host-side teardown after any detach, from whichever thread noticed. The
-     * container belongs to the host, so it takes it back rather than trusting a
-     * plugin that may have just thrown.
-     */
+    /** Host-side teardown after any detach, from whichever thread noticed. */
     protected void reclaim() {
         runOnUiThread(() -> pluginContainer.removeAllViews());
     }
@@ -117,23 +100,7 @@ public class HostActivity extends Activity implements PushServer.Bridge {
         return r;
     }
 
-    /**
-     * The push channel lives as long as the activity, not as long as it is on
-     * screen.
-     *
-     * It used to close in onStop, on the reasoning that a backgrounded activity
-     * cannot drain the UI thread. That was simply wrong: the main looper keeps
-     * running, so runOnUiThread works perfectly well in the background. Only
-     * the GL thread stops, because GLSurfaceView.onPause halts it -- so shader
-     * compiles genuinely need the foreground, and everything else does not.
-     *
-     * The old behaviour also broke the second screen, which backgrounds this
-     * activity and so cut the channel exactly when a plugin most wanted it.
-     *
-     * The cost is that the socket is open whenever the app is alive rather than
-     * only while you are looking at it. On loopback, on a phone you own, that
-     * is the better trade.
-     */
+    /** The push channel lives as long as the activity, not as long as it is on screen. */
     private void startServer() {
         server = new PushServer(this, versionName());
         port = server.start();
@@ -153,11 +120,6 @@ public class HostActivity extends Activity implements PushServer.Bridge {
     /**
      * Immersive sticky: status and nav bars hidden, restored briefly by an edge
      * swipe and then hidden again on their own.
-     *
-     * setSystemUiVisibility is deprecated in favour of WindowInsetsController
-     * (API 30). The old flags still work because we target SDK 34; Android 15+
-     * only ignores them for apps targeting 35 or higher, so raising targetSdk
-     * and switching to the controller are one change, not two.
      */
     protected void goFullscreen() {
         getWindow().getDecorView().setSystemUiVisibility(
@@ -169,11 +131,7 @@ public class HostActivity extends Activity implements PushServer.Bridge {
             | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    /**
-     * Draw under the camera cutout. With the status bar hidden the default
-     * policy letterboxes the window away from it, which shows up as a black
-     * band across the top.
-     */
+    /** Draw under the camera cutout. */
     private void drawUnderCutout() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return;
         WindowManager.LayoutParams lp = getWindow().getAttributes();
@@ -188,9 +146,7 @@ public class HostActivity extends Activity implements PushServer.Bridge {
         if (hasFocus) goFullscreen();
     }
 
-    // Touches reach the activity when nothing in the plugin's container claims
-    // them first -- an ordinary view hierarchy, so a plugin that adds a button
-    // gets normal button behaviour without going through this at all.
+    // Touches reach the activity when nothing in the plugin's container claims them first -- an ordinary view hierarchy, so a plugin that adds a button gets normal button behaviour without going through this at all.
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         int w = pluginContainer.getWidth();
@@ -198,8 +154,7 @@ public class HostActivity extends Activity implements PushServer.Bridge {
         if (w > 0 && h > 0) {
             float unit = Math.min(w, h);
             float sx = (e.getX() * 2f - w) / unit;
-            // Flipped so the y axis matches GL's, which counts up from the
-            // bottom, rather than MotionEvent's, which counts down from the top.
+            // Flipped so the y axis matches GL's, which counts up from the bottom, rather than MotionEvent's, which counts down from the top.
             float sy = ((h - e.getY()) * 2f - h) / unit;
             if (plugins.event(Plugin.TOUCH, e.getActionMasked(), sx, sy)) return true;
         }
@@ -275,9 +230,7 @@ public class HostActivity extends Activity implements PushServer.Bridge {
 
         Plugin fresh;
         try {
-            // Writing the dex and loading its classes is plain file and
-            // classloader work, so it stays off the UI thread; only attach()
-            // has to happen there, since a plugin builds views in it.
+            // Writing the dex and loading its classes is plain file and classloader work, so it stays off the UI thread; only attach() has to happen there, since a plugin builds views in it.
             fresh = plugins.load(dex, name);
         } catch (Throwable t) {
             return new PushServer.Result(false, "load failed: " + t + "\n");

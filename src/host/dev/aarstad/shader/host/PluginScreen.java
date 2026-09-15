@@ -9,12 +9,6 @@ import android.widget.FrameLayout;
 /**
  * A spare activity, declared up front so a plugin can open a second screen
  * without a reinstall.
- *
- * This is what front-loading the manifest means in practice. Activities cannot
- * be added by a push -- they are fixed at install -- so the ones a plugin might
- * plausibly want have to exist before they are needed. It does nothing on its
- * own: it hands its container to the plugin and closes again if the plugin
- * isn't interested.
  */
 public final class PluginScreen extends Activity {
 
@@ -37,8 +31,7 @@ public final class PluginScreen extends Activity {
         setContentView(root);
 
         if (!host.plugins.event(Plugin.SCREEN_OPEN, root)) {
-            // No plugin, or one that doesn't want a second screen. Don't leave
-            // an empty activity sitting there.
+            // No plugin, or one that doesn't want a second screen.
             finish();
         }
     }

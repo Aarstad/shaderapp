@@ -15,12 +15,8 @@ import dev.aarstad.shader.host.HostActivity;
 import dev.aarstad.shader.host.PushServer;
 
 /**
- * The shader module: a background that draws GLSL, a "gl" capability offered to
- * plugins, and the preset routes on the push channel.
- *
- * Everything here is optional. {@link HostActivity} runs perfectly well on its
- * own -- point the manifest's launcher at it and delete src/gl, and you have
- * the bare template with nothing but a plugin container.
+ * The shader module: a background that draws GLSL, a "gl" capability offered
+ * to plugins, and the preset routes on the push channel.
  */
 public final class ShaderActivity extends HostActivity {
 
@@ -46,8 +42,7 @@ public final class ShaderActivity extends HostActivity {
         head = Presets.head(this);
         renderer = new PresetRenderer(head, Presets.load(this));
 
-        // Reopen on whatever was last being watched. Stored by name, since the
-        // cycle can gain or lose presets between launches.
+        // Reopen on whatever was last being watched.
         String last = prefs().getString(KEY_PRESET, null);
         if (last != null) renderer.setInitialIndex(renderer.names().indexOf(last));
 
@@ -92,8 +87,7 @@ public final class ShaderActivity extends HostActivity {
                 return true;
 
             case MotionEvent.ACTION_UP:
-                // In immersive mode the edge swipe that reveals the system bars
-                // would otherwise count as a tap.
+                // In immersive mode the edge swipe that reveals the system bars would otherwise count as a tap.
                 float dx = e.getX() - downX;
                 float dy = e.getY() - downY;
                 boolean moved = dx * dx + dy * dy > touchSlop * touchSlop;
@@ -153,8 +147,6 @@ public final class ShaderActivity extends HostActivity {
                 return;
             }
             // Plugin code, so it runs under the host's catch-and-detach rule.
-            // Wrapped once here rather than per frame, to keep the draw path
-            // free of allocation.
             renderer.setFrameCallback(seconds -> {
                 if (!plugins.active()) return;
                 try {
@@ -224,8 +216,7 @@ public final class ShaderActivity extends HostActivity {
         PushServer.Result r = onGl(() -> renderer.install(name, body));
         if (!r.ok) return r;
 
-        // Persist only what actually compiled, so a bad push can never be
-        // reloaded into a broken app at next launch.
+        // Persist only what actually compiled, so a bad push can never be reloaded into a broken app at next launch.
         try {
             Presets.save(this, name, body);
         } catch (IOException e) {

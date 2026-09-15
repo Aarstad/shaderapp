@@ -11,16 +11,9 @@ import android.os.Build;
 import android.os.IBinder;
 
 /**
- * A foreground service, declared up front for the same reason as
- * {@link PluginScreen}: a push cannot add one, so it has to exist before a
- * plugin wants to keep working with the app off screen.
- *
- * It holds no logic of its own. It keeps the process alive and tells the plugin
- * when it starts and stops; what happens in between is the plugin's business.
- *
- * Note the push channel still closes when the activity leaves the foreground,
- * because pushes need the UI thread. A running service keeps the plugin's own
- * work going -- it does not make the app pushable while backgrounded.
+ * A foreground service, declared up front for the same reason as {@link
+ * PluginScreen}: a push cannot add one, so it has to exist before a plugin
+ * wants to keep working with the app off screen.
  */
 public final class PluginService extends Service {
 
@@ -51,8 +44,7 @@ public final class PluginService extends Service {
         HostActivity host = HostActivity.current();
         if (host != null) host.plugins.event(Plugin.SERVICE_START, label);
 
-        // Not sticky: a restart would arrive with a null intent and no plugin
-        // to tell, which is a service running for nobody.
+        // Not sticky: a restart would arrive with a null intent and no plugin to tell, which is a service running for nobody.
         return START_NOT_STICKY;
     }
 

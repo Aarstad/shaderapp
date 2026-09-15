@@ -17,11 +17,7 @@ import javax.microedition.khronos.opengles.GL10;
 
 import dev.aarstad.shader.host.PushServer;
 
-/**
- * Draws one fullscreen triangle per frame and lets the fragment shader do all
- * the work. Programs are compiled at surface creation and swapped by index, so
- * cycling costs nothing at the tap.
- */
+/** Draws one fullscreen triangle per frame and lets the fragment shader do all the work. */
 final class PresetRenderer implements GLSurfaceView.Renderer {
 
     // Fullscreen triangle -- cheaper than a quad and needs no index buffer.
@@ -57,9 +53,9 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
     private FloatBuffer verts;
 
     /**
-     * The shared vertex shader, kept alive for the life of the context
-     * rather than deleted after setup, because a pushed preset needs
-     * something to link against later.
+     * The shared vertex shader, kept alive for the life of the context rather
+     * than deleted after setup, because a pushed preset needs something to link
+     * against later.
      */
     private int vs;
 
@@ -67,14 +63,9 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
     private volatile Gl.FrameCallback frameCallback;
 
     /**
-     * Whether onSurfaceCreated has run, so there is a context and a program per
-     * preset.
-     *
-     * The activity can exist without one: the push channel now opens in
-     * onCreate, and GLSurfaceView drains its event queue even before a surface
-     * arrives -- so a queued compile really does run, with no context, and
-     * every GL call quietly fails. Without this check that surfaces as an empty
-     * 400 four milliseconds after the request, which says nothing at all.
+     * Whether onSurfaceCreated has run. GLSurfaceView drains its event queue
+     * before a surface exists, so a queued compile really does run with no
+     * context and every GL call quietly fails.
      */
     private volatile boolean surfaceReady;
 
@@ -105,14 +96,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
     float seconds() { return (SystemClock.uptimeMillis() - startMs) / 1000.0f; }
     String errorFor(int i) { return i < errors.size() ? errors.get(i) : null; }
 
-    /**
-     * Write a uniform on the program that is drawing this frame. A name the
-     * shader doesn't declare resolves to -1 and is dropped, which is what
-     * lets a single plugin feed a whole cycle of unrelated shaders.
-     *
-     * Only meaningful from inside a frame callback; anywhere else there is
-     * no bound program and this is a no-op rather than a crash.
-     */
+    /** Write a uniform on the program that is drawing this frame. */
     void setUniform(String name, float[] v) {
         if (drawing == null || v == null) return;
         int loc = locate(drawing, name);
@@ -161,9 +145,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         for (int i = 0; i < bodies.size(); i++) {
             Prog p = build(bodies.get(i));
             if (p == null) {
-                // A persisted shader that no longer compiles -- on this
-                // driver, or after an edit saved before a context loss.
-                // Draw the fallback rather than crash on launch.
+                // A persisted shader that no longer compiles -- on this driver, or after an edit saved before a context loss.
                 errors.set(i, lastError);
                 p = build(Presets.FALLBACK_BODY);
             }
@@ -200,8 +182,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         GLES20.glUseProgram(p.program);
         GLES20.glUniform1f(p.uTime, t);
 
-        // Built-ins are set first, so a plugin can add uniforms or override
-        // them. drawing is what setUniform() resolves names against.
+        // Built-ins are set first, so a plugin can add uniforms or override them.
         Gl.FrameCallback cb = frameCallback;
         if (cb != null) {
             drawing = p;
@@ -215,13 +196,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(p.aPos);
     }
 
-    /**
-     * Compile a pushed shader and swap it in. GL thread only.
-     *
-     * The new program is built to completion before anything is replaced,
-     * so a shader that fails to compile leaves the running one untouched --
-     * you keep looking at the last good version while you fix it.
-     */
+    /** Compile a pushed shader and swap it in. */
     PushServer.Result install(String name, String body) {
         if (!surfaceReady) return noSurface();
 
@@ -269,8 +244,7 @@ final class PresetRenderer implements GLSurfaceView.Renderer {
     }
 
     private static PushServer.Result noSurface() {
-        // 503 rather than 400: nothing is wrong with the shader, the app just
-        // has no drawing surface yet. Same status the GL-thread timeout uses.
+        // 503 rather than 400: nothing is wrong with the shader, the app just has no drawing surface yet.
         return new PushServer.Result(false,
             "no GL surface yet -- open the app so it is actually drawing, then push again\n", 503);
     }

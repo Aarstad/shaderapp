@@ -14,17 +14,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
- * Where shader source comes from, and where pushed source goes.
- *
- * Two layers. The APK's assets/shaders/ holds the presets that ship with the
- * build; getFilesDir()/presets/ holds anything pushed over the loopback server
- * at runtime. A file in the overlay shadows the asset of the same name, so a
- * pushed shader survives the app being killed, and deleting the overlay file
- * reverts to the built-in.
- *
- * Every fragment shader is GLSL ES 1.00 and gets _head.glsl prepended, which
- * supplies u_res, u_time, centred() and palette(). That is what lets the
- * renderer swap between presets without special-casing any of them.
+ * Where shader source comes from. assets/shaders/ is the build's baseline;
+ * getFilesDir()/presets/ is what was pushed, and shadows it by name.
  */
 public final class Presets {
 
@@ -80,8 +71,7 @@ public final class Presets {
         try {
             return readAsset(ctx.getAssets(), HEAD_ASSET);
         } catch (IOException e) {
-            // Without the head nothing compiles, so fail loudly here rather
-            // than as five identical "undefined centred()" logs later.
+            // Without the head nothing compiles, so fail loudly here rather than as five identical "undefined centred()" logs later.
             throw new IllegalStateException("assets/" + HEAD_ASSET + " missing from the APK", e);
         }
     }
@@ -95,8 +85,7 @@ public final class Presets {
 
     /**
      * Built-in order first, then anything in the overlay that isn't a built-in,
-     * alphabetically. So pushing a brand new name appends it to the cycle and
-     * pushing an existing one replaces it in place.
+     * alphabetically.
      */
     static List<Preset> load(Context ctx) {
         AssetManager assets = ctx.getAssets();
@@ -136,8 +125,7 @@ public final class Presets {
             try {
                 out.add(new Preset(name, readAsset(assets, DIR + "/" + name + ".frag"), false));
             } catch (IOException e) {
-                // Named in order.txt but absent from assets, and no overlay
-                // either. Nothing to draw, so leave it out of the cycle.
+                // Named in order.txt but absent from assets, and no overlay either.
             }
         }
 

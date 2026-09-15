@@ -16,23 +16,8 @@ import java.net.UnknownHostException;
 import java.util.Arrays;
 
 /**
- * A deliberately small HTTP server, bound to loopback only, that accepts code,
- * data and commands for the running app.
- *
- * This is the app's whole update story. An APK can't replace itself without the
- * package installer prompting, but a dex can be loaded at runtime and files can
- * be written at runtime -- so the APK ships a host, and iteration happens by
- * POSTing into the running process. No reinstall, no prompt, and the app does
- * not restart.
- *
- * Nothing here knows what the app draws. Core routes cover the plugin, the
- * command channel and plugin-visible files; anything app-specific arrives
- * through {@link Extra}, which the shader module uses for its preset routes.
- *
- * It listens on 127.0.0.1, so only code already on this device can reach it,
- * and only while the activity exists. Any app on the device could post to it,
- * and the worst it can do is drive the app you are already looking at -- the
- * right trade for a development channel on a phone you own.
+ * A deliberately small HTTP server, bound to loopback only, that accepts
+ * code, data and commands for the running app.
  */
 public final class PushServer implements Runnable {
 
@@ -98,12 +83,9 @@ public final class PushServer implements Runnable {
     }
 
     /**
-     * Loopback, but specifically the IPv4 one.
-     *
-     * InetAddress.getLoopbackAddress() hands back ::1 on any device with IPv6
-     * up, and a socket bound to ::1 will not accept the IPv4 connections that a
-     * client aimed at 127.0.0.1 makes -- it just reads as "connection refused",
-     * which looks exactly like the app not running.
+     * Loopback, but specifically the IPv4 one. getLoopbackAddress() returns ::1
+     * where IPv6 is up, and a socket bound there refuses IPv4 connections --
+     * which reads exactly like the app not running.
      */
     private static InetAddress loopback() {
         try {
@@ -114,8 +96,8 @@ public final class PushServer implements Runnable {
     }
 
     /**
-     * Names are used as filenames and echoed into responses, so only this
-     * shape is accepted -- no dots, no separators, nothing that traverses.
+     * Names are used as filenames and echoed into responses, so only this shape
+     * is accepted -- no dots, no separators, nothing that traverses.
      */
     public static boolean validName(String name) {
         if (name == null || name.isEmpty() || name.length() > 64) return false;
@@ -134,10 +116,8 @@ public final class PushServer implements Runnable {
         InetAddress loopback = loopback();
         for (int i = 0; i < PORT_TRIES; i++) {
             try {
-                // Bound in two steps so SO_REUSEADDR can be set first. An
-                // activity that gets recreated stops and restarts this within
-                // milliseconds, and without it the old socket's lingering bind
-                // would push the next one onto a different port.
+                // Two steps so SO_REUSEADDR can be set first; a recreated activity
+                // otherwise loses the port to its own lingering bind.
                 ServerSocket s = new ServerSocket();
                 s.setReuseAddress(true);
                 s.bind(new InetSocketAddress(loopback, PORT_BASE + i), 4);
@@ -175,8 +155,7 @@ public final class PushServer implements Runnable {
                 client.setSoTimeout(READ_TIMEOUT_MS);
                 handle(client);
             } catch (IOException e) {
-                // A closed listener during stop() lands here, as does any
-                // client that hangs up mid-request. Neither is worth logging.
+                // A closed listener during stop() lands here, as does any client that hangs up mid-request.
             } finally {
                 if (client != null) {
                     try {
@@ -226,8 +205,7 @@ public final class PushServer implements Runnable {
             return;
         }
 
-        // Read as bytes throughout. Most bodies are text, but a pushed dex is
-        // binary and would not survive a round trip through a String.
+        // Read as bytes throughout.
         byte[] body = length > 0 ? readBody(in, length) : new byte[0];
         route(out, method, path, body, pluginClass);
     }
