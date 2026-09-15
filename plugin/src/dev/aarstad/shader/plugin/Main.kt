@@ -30,8 +30,10 @@ class Main : Plugin {
     private var label: TextView? = null
     private var shownPreset = -1
 
-    /** Counts frame callbacks, so "is it drawing at all" is answerable. */
     private var frames = 0
+    private var lastFrames = 0
+    private var lastAt = 0f
+    private var fps = 0f
 
     /** Last touch, already in shader space. */
     private var tx = 0f
@@ -123,6 +125,13 @@ class Main : Plugin {
     private fun frame(t: Float) {
         val g = gl ?: return
         frames++
+
+        // Measured over a one-second window, so "is it slow" has an answer.
+        if (t - lastAt >= 1f) {
+            fps = (frames - lastFrames) / (t - lastAt)
+            lastFrames = frames
+            lastAt = t
+        }
 
         g.setUniform("u_touch", tx, ty)
         g.setFloat("u_pulse", Math.exp(-maxOf(0f, t - tappedAt).toDouble() * decay).toFloat())
@@ -270,7 +279,7 @@ class Main : Plugin {
                 "burst at $tx,$ty"
             }
 
-            "status" -> "touchwarp/ui  seconds=${gl?.seconds()}  frames=$frames  " +
+            "status" -> "touchwarp/ui  fps=${"%.1f".format(fps)}  frames=$frames  " +
                 "swap #${host.state().getInt("swaps")}  " +
                 "gl=${gl != null}  touch $tx,$ty  down $down  " +
                 "decay $decay  cycle ${describeCycle()}  " +
