@@ -3,9 +3,12 @@ package dev.aarstad.shader;
 import android.app.Activity;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.widget.Toast;
 
@@ -24,11 +27,17 @@ public class MainActivity extends Activity {
     /** Mirrors the renderer's index so the toast can name the preset off the UI thread. */
     private int shown = 0;
 
+    private int touchSlop;
+    private float downX, downY;
+    private long downAt;
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        drawUnderCutout();
 
+        touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
         renderer = new PresetRenderer();
 
         view = new GLSurfaceView(this);
@@ -36,21 +45,86 @@ public class MainActivity extends Activity {
         view.setRenderer(renderer);
         view.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         setContentView(view);
+
+        goFullscreen();
+    }
+
+    /**
+     * Immersive sticky: status and nav bars hidden, restored briefly by an edge
+     * swipe and then hidden again on their own.
+     *
+     * setSystemUiVisibility is deprecated in favour of WindowInsetsController
+     * (API 30), but we compile against android-23.jar -- the only platform
+     * Debian's android-sdk ships -- so the controller isn't on the classpath.
+     * The old flags still work because we target SDK 34; Android 15+ only
+     * ignores them for apps targeting 35 or higher.
+     */
+    private void goFullscreen() {
+        view.setSystemUiVisibility(
+              View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    /**
+     * Let the shader run under the camera cutout. With the status bar hidden the
+     * default policy letterboxes the window away from the cutout, which shows up
+     * as a black band across the top.
+     *
+     * LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES and the field it goes in both
+     * arrived in API 28, well after android-23, hence the reflection.
+     */
+    private void drawUnderCutout() {
+        if (Build.VERSION.SDK_INT < 28) return;
+        try {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.getClass().getField("layoutInDisplayCutoutMode").setInt(lp, 1);
+            getWindow().setAttributes(lp);
+        } catch (Exception e) {
+            // Vendor ROM without the field. The shader stops at the cutout
+            // instead of running under it -- not worth crashing over.
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) goFullscreen();
     }
 
     // GLSurfaceView isn't clickable, so touches fall through to the activity.
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getActionMasked() != MotionEvent.ACTION_DOWN) return false;
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                downX = e.getX();
+                downY = e.getY();
+                downAt = e.getEventTime();
+                return true;
 
+            case MotionEvent.ACTION_UP:
+                // Only a real tap cycles. In immersive mode the edge swipe that
+                // reveals the system bars would otherwise count as one.
+                float dx = e.getX() - downX;
+                float dy = e.getY() - downY;
+                boolean moved = dx * dx + dy * dy > touchSlop * touchSlop;
+                boolean held = e.getEventTime() - downAt > ViewConfiguration.getLongPressTimeout();
+                if (!moved && !held) cycle();
+                return true;
+        }
+        return false;
+    }
+
+    private void cycle() {
         shown = (shown + 1) % Presets.NAMES.length;
         final int next = shown;
         view.queueEvent(new Runnable() {
             @Override public void run() { renderer.select(next); }
         });
-
         Toast.makeText(this, Presets.NAMES[next], Toast.LENGTH_SHORT).show();
-        return true;
     }
 
     @Override protected void onPause() { super.onPause(); view.onPause(); }
