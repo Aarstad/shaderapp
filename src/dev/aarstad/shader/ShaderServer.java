@@ -9,6 +9,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
+import java.net.UnknownHostException;
 
 /**
  * A deliberately small HTTP server, bound to loopback only, that accepts shader
@@ -73,9 +74,25 @@ final class ShaderServer implements Runnable {
         this.version = version;
     }
 
+    /**
+     * Loopback, but specifically the IPv4 one.
+     *
+     * InetAddress.getLoopbackAddress() hands back ::1 on any device with IPv6
+     * up, and a socket bound to ::1 will not accept the IPv4 connections that
+     * a client aimed at 127.0.0.1 makes -- it just reads as "connection
+     * refused", which looks exactly like the app not running.
+     */
+    private static InetAddress loopback() {
+        try {
+            return InetAddress.getByName("127.0.0.1");
+        } catch (UnknownHostException e) {
+            return InetAddress.getLoopbackAddress();
+        }
+    }
+
     /** @return the bound port, or -1 if every candidate was taken. */
     int start() {
-        InetAddress loopback = InetAddress.getLoopbackAddress();
+        InetAddress loopback = loopback();
         for (int i = 0; i < PORT_TRIES; i++) {
             try {
                 socket = new ServerSocket(PORT_BASE + i, 4, loopback);

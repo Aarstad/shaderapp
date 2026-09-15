@@ -19,23 +19,31 @@ PORT_TRIES=10
 
 die() { echo "push: $*" >&2; exit 1; }
 
-# The app takes the first free port in its range, so find where it actually landed.
-find_port() {
-  local p
-  for (( p = PORT_BASE; p < PORT_BASE + PORT_TRIES; p++ )); do
-    if curl -sf -m 1 "http://127.0.0.1:$p/health" >/dev/null 2>&1; then
-      echo "$p"
-      return 0
-    fi
+# Never proxy a loopback request. Claude Code (and anything else that exports
+# http_proxy) would otherwise swallow every call to the app and answer for it.
+CURL=(curl --noproxy '*' -g -s)
+
+# Which loopback the app got depends on the device: InetAddress.getLoopbackAddress()
+# hands back ::1 where IPv6 is up, 127.0.0.1 otherwise. Try both, and take the
+# first free port in the range since that is how the app picks one.
+find_base() {
+  local host p url
+  for host in 127.0.0.1 "[::1]"; do
+    for (( p = PORT_BASE; p < PORT_BASE + PORT_TRIES; p++ )); do
+      url="http://$host:$p"
+      if "${CURL[@]}" -f -m 1 "$url/health" >/dev/null 2>&1; then
+        echo "$url"
+        return 0
+      fi
+    done
   done
   return 1
 }
 
-PORT=$(find_port) || die "app isn't listening.
+BASE=$(find_base) || die "app isn't listening.
 Open the shader app and leave it on screen -- the push channel only runs in the foreground."
 
-BASE="http://127.0.0.1:$PORT"
-HEAD_LINES=$(curl -sf -m 2 "$BASE/health" | command awk '/^headLines /{print $2}')
+HEAD_LINES=$("${CURL[@]}" -f -m 2 "$BASE/health" | command awk '/^headLines /{print $2}')
 : "${HEAD_LINES:=0}"
 
 # GLSL logs number lines in the concatenated source (shared preamble + your
@@ -56,11 +64,11 @@ request() {  # method path [file]
   local method=$1 path=$2 file=${3:-} out code
   out=$(mktemp)
   if [ -n "$file" ]; then
-    code=$(curl -s -o "$out" -w '%{http_code}' -m 10 \
+    code=$("${CURL[@]}" -o "$out" -w '%{http_code}' -m 10 \
       -X "$method" --data-binary "@$file" \
       -H 'Content-Type: text/plain' "$BASE$path")
   else
-    code=$(curl -s -o "$out" -w '%{http_code}' -m 10 -X "$method" "$BASE$path")
+    code=$("${CURL[@]}" -o "$out" -w '%{http_code}' -m 10 -X "$method" "$BASE$path")
   fi
   if [ "$code" = "200" ]; then
     command cat "$out"
@@ -105,7 +113,7 @@ case "${1:-}" in
   ""|-h|--help)
     command sed -n '4,13p' "$0" | command sed 's/^# \{0,1\}//'
     echo
-    echo "app is on port $PORT"
+    echo "app is at $BASE"
     ;;
   *) push_file "$1" ;;
 esac

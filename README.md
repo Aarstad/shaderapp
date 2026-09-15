@@ -76,6 +76,14 @@ the phone could post to it, and the worst it can do is draw something -- that is
 the right trade for a development channel, but it is why the socket closes the
 moment the app leaves the foreground.
 
+Two things that make loopback less obvious than it looks, both handled:
+
+- The server binds **127.0.0.1 explicitly**, not `getLoopbackAddress()` -- that
+  returns `::1` wherever IPv6 is up, and a socket bound to `::1` refuses IPv4
+  connections, which is indistinguishable from the app not running.
+- `push.sh` passes `--noproxy '*'`. An exported `http_proxy` (Claude Code sets
+  one) otherwise intercepts even loopback requests and answers for the app.
+
 ## How it draws
 
 `MainActivity` puts a `GLSurfaceView` in continuous render mode and keeps the
