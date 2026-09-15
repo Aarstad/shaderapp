@@ -1,94 +1,130 @@
 package dev.aarstad.shader;
 
+import android.app.Activity;
+import android.os.Bundle;
+import android.view.ViewGroup;
+
+import java.io.File;
+
 /**
- * The contract between the app and Java pushed into it at runtime.
+ * The contract between the app and code pushed into it at runtime.
  *
- * Shaders hot-swap because GLSL is text the driver compiles on demand. Java
- * can hot-swap too -- a dex file loaded through DexClassLoader -- but with one
- * hard limit: a class already loaded can never be replaced. Only *new* classes
- * from a *new* loader come in. So the app is split in two. Everything that has
- * to stay put lives in the APK, and everything worth iterating on lives behind
- * this interface, in a dex that gets pushed.
+ * A class already loaded can never be replaced -- only new classes from a new
+ * loader. So the app splits: what must stay put is in the APK, and what is
+ * worth iterating on lives behind this interface, in a dex that gets pushed.
+ * This interface is therefore the one thing a push cannot change. Adding a
+ * method here means a reinstall.
  *
- * Which makes this interface the one thing a push genuinely cannot change.
- * Adding a method here means a reinstall, so it is deliberately small and
- * deliberately loose -- setUniform() takes any name and any arity, and
- * command() takes free text, precisely so the interesting decisions can be
- * made on the far side of it.
+ * Which shapes the whole design. There are four methods, and only the two that
+ * are certain to be needed forever -- coming and going -- are typed. Everything
+ * else arrives through {@link #event}, a deliberately loose channel keyed by
+ * name, and every host capability through {@link Host#extension}, likewise. A
+ * host that grows a new capability still needs rebuilding, but the *interface*
+ * does not change, so plugins written against the old one keep loading and can
+ * feature-detect what they are running on.
  *
- * A plugin is a class named dev.aarstad.shader.plugin.Main with a no-argument
- * constructor. Anything it throws is caught: the plugin is detached and the
- * app carries on with its built-in behaviour, so a bad push degrades rather
- * than crashes.
+ * That is a real trade: stringly-typed dispatch instead of compiler-checked
+ * signatures. It buys never having to reinstall to teach the app a new trick,
+ * which on a device where every install costs a tap is worth more than the
+ * type checking. In Kotlin a `when (name)` makes the plugin side read cleanly
+ * anyway.
+ *
+ * A plugin is a class dev.aarstad.shader.plugin.Main with a no-argument
+ * constructor. Anything it throws is caught: the plugin is detached and the app
+ * carries on, so a bad push degrades rather than crashes.
  */
 public interface Plugin {
 
-    /** What a plugin is allowed to ask of the running app. */
+    // ---- event names ---------------------------------------------------------
+    // Passed to event(). Unknown names must be ignored and return false, so a
+    // plugin stays compatible with a host that sends more than it knows about.
+
+    /** The app came to the foreground. No arguments. */
+    String RESUME = "resume";
+
+    /** The app is leaving the foreground. No arguments. */
+    String PAUSE = "pause";
+
+    /** Back was pressed. Return true to swallow it and stay open. */
+    String BACK = "back";
+
+    /**
+     * A touch. Arguments: Integer action (a MotionEvent constant), Float x,
+     * Float y -- centred and aspect-corrected to [-1,1], matching what
+     * centred() returns in GLSL, so a coordinate can go straight to a shader
+     * and land under the finger. Return true to claim it.
+     */
+    String TOUCH = "touch";
+
+    /** What plugin code is handed. */
     interface Host {
 
         /**
-         * Set a uniform on the shader that is about to draw. Takes 1 to 4
-         * floats, mapping onto float/vec2/vec3/vec4.
-         *
-         * A name the current shader does not declare is silently ignored --
-         * that is ordinary GLSL behaviour, and it is what lets one plugin feed
-         * uniforms to a whole cycle of shaders that each use a different
-         * subset.
+         * The hosting activity: context, resources, window, system services,
+         * startActivity, permission requests. The broad escape hatch -- a
+         * plugin can reach anything an ordinary app could.
          */
-        void setUniform(String name, float... values);
+        Activity activity();
 
-        /** setUniform for the common case, without the array allocation. */
-        void setFloat(String name, float value);
+        /**
+         * A full-size container the plugin owns, laid over whatever the app
+         * draws underneath. Add views here; the host empties it on detach, so
+         * a swap never leaves a predecessor's UI behind.
+         */
+        ViewGroup container();
 
-        int presetCount();
-        String presetName(int index);
-        int currentPreset();
+        /** Plugin-private storage. Survives swaps, process death and reinstalls. */
+        File dataDir();
 
-        /** Switch preset. Safe to call from frame(). */
-        void select(int index);
+        /**
+         * Scratch state the host holds, so it survives a swap -- a push builds
+         * a new instance and every field resets, but this does not. Lives in
+         * memory only; use dataDir() to outlive the process.
+         */
+        Bundle state();
 
-        /** Briefly show text on screen. */
-        void toast(String message);
-
-        /** Append to the app's log ring, which push.sh can read back. */
+        /** Append to the app's log ring, which push.sh reads back over HTTP. */
         void log(String message);
 
-        /** Seconds since the surface was created -- the same clock as u_time. */
-        float seconds();
+        void toast(String message);
+
+        /** Run on the UI thread. */
+        void post(Runnable action);
+
+        /**
+         * An optional host capability by name, or null if this host has none.
+         *
+         * How the app offers anything domain-specific without it being in this
+         * interface. "gl" returns a {@link Gl}. A plugin that needs one should
+         * check for null and degrade, rather than assume.
+         */
+        Object extension(String name);
     }
 
-    /** Called once, on the GL thread, right after the dex is loaded. */
+    /** Called once, on the UI thread, right after the dex is loaded. */
     void attach(Host host);
 
     /**
-     * Called on the GL thread every frame, after the current shader's program
-     * is bound and before it draws -- so setUniform() lands on the right
-     * program.
-     *
-     * @param seconds the same clock the shaders see as u_time
+     * Called before the plugin is dropped. The host clears the container and
+     * unregisters callbacks afterwards, so this is only for the plugin's own
+     * cleanup -- threads, listeners, open files.
      */
-    void frame(float seconds);
+    void detach();
 
     /**
-     * A touch, on the UI thread.
+     * Anything that is not attach or detach, keyed by name. Arguments depend on
+     * the event; see the constants above.
      *
-     * x and y are in shader space, not pixels: centred on the screen and
-     * aspect-corrected to [-1,1], exactly what centred() returns in GLSL. So a
-     * touch coordinate can be handed straight to a shader as a uniform and
-     * lands under the finger.
+     * Unknown names must return false rather than throw.
      *
-     * @param action a MotionEvent action constant
-     * @return true if handled; false lets the built-in tap-to-cycle run
+     * @return true if the event was handled, which matters for BACK and TOUCH
      */
-    boolean touch(int action, float x, float y);
+    boolean event(String name, Object... args);
 
     /**
-     * Free text from push.sh -c, answered synchronously. The reply goes back
-     * over HTTP. This is the escape hatch: a plugin can expose whatever
-     * controls it likes without the app knowing anything about them.
+     * Free text from push.sh -c, answered synchronously, from the server
+     * thread. The escape hatch in the other direction: a plugin exposes
+     * whatever controls it likes without the app knowing anything about them.
      */
     String command(String line);
-
-    /** Called before the plugin is dropped, on the GL thread. */
-    void detach();
 }

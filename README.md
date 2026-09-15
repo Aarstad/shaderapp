@@ -100,24 +100,74 @@ pushed:
 
     ./push.sh -p              build plugin/ and swap the dex in
     ./push.sh -p some.dex     push a dex you already have
-    ./push.sh -c 'cycle 6'    send free text to the plugin
+    ./push.sh -c 'status'     send free text to the plugin
     ./push.sh -i              status and recent log
     ./push.sh -P              detach it
 
 A plugin is a class `dev.aarstad.shader.plugin.Main` with a no-argument
-constructor (override with the `X-Plugin-Class` header). It gets every frame on
-the GL thread with the drawing program already bound, every touch in shader
-space, and free text from `-c`.
+constructor (override with the `X-Plugin-Class` header).
 
-`Plugin` is the one thing a push cannot change -- adding a method to it means a
-reinstall. That is why it is small and loose: `setUniform()` takes any name and
-any arity, `command()` takes any string. The example plugin invents `u_touch`,
-`u_pulse` and `u_down`, plus a `cycle`/`decay`/`status` command vocabulary, and
-the app knows about none of them.
+### The contract
 
-Because a uniform the current shader doesn't declare resolves to -1 and is
-dropped, one plugin can feed a whole cycle of unrelated shaders and each picks
-up only what it declares.
+`Plugin` is the one thing a push cannot change -- adding a method means a
+reinstall. So it has four methods, and only the two that are certain to be
+needed forever are typed:
+
+```java
+void attach(Host host);
+void detach();
+boolean event(String name, Object... args);   // resume, pause, back, touch, ...
+String command(String line);
+```
+
+Everything else arrives by name. Events go through `event()`, host capabilities
+through `Host.extension()`. That is a deliberate trade -- stringly-typed
+dispatch instead of compiler-checked signatures -- and it buys never having to
+reinstall to teach the app a new trick. On a device where every install costs a
+tap, that is worth more than the type checking, and a Kotlin `when (name)`
+reads cleanly enough on the plugin side.
+
+Unknown event names must return false rather than throw, so a plugin keeps
+working against a host that sends more than it knows about.
+
+`Host` is where the generality actually lives:
+
+| | |
+|---|---|
+| `activity()` | context, window, resources, intents, permissions -- the broad escape hatch |
+| `container()` | a full-size `ViewGroup` the plugin owns, over whatever the app draws |
+| `dataDir()` | private storage; survives swaps, process death and reinstalls |
+| `state()` | a `Bundle` the *host* holds, so it survives a swap; in memory only |
+| `log()` / `toast()` / `post()` | the log ring, a toast, the UI thread |
+| `extension(name)` | optional host capabilities; `"gl"` returns a `Gl`, null elsewhere |
+
+`state()` matters more than it looks. A push builds a **new instance**, so every
+field resets -- the code persists, the object does not. Anything that should
+outlive a swap goes in the bundle, or in `dataDir()` to outlive the process too.
+
+### Not shader-shaped
+
+GL is not in `Plugin`. It is an optional `Gl` extension, fetched by name and
+null-checked, so a plugin that only wants to put views on screen never has to
+know it exists -- and a host that draws something else entirely can offer a
+different extension without the shared interface changing.
+
+Frames are a callback registered on `Gl` rather than an `event()`, because they
+run 60 times a second and dispatching on a string while boxing arguments would
+be waste. The host wraps whatever is registered in the same catch-and-detach
+guard everything else gets.
+
+The example plugin builds a real Android view hierarchy, handles back, and
+keeps a counter across swaps -- none of which involves GL. Its shader work is
+all behind `extension("gl")`, guarded on null, which is the point: the same
+class would load and run in a host that draws nothing.
+
+### What still needs a reinstall
+
+The manifest. Activities, permissions, services, the app name and icon are
+fixed at install, and no push changes them. Which is a templating problem
+rather than a framework one: declare the permissions and components you might
+plausibly want up front, and most later ideas need no reinstall at all.
 
 ### Not crashing
 

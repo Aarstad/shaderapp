@@ -18,12 +18,14 @@ import dalvik.system.DexClassLoader;
  * Throwable. A plugin that throws is logged, detached and forgotten, and the
  * app falls back to its built-in behaviour mid-frame.
  *
- * That covers a plugin that throws. It does not cover one that hangs or dies
- * during attach(), which would take the GL thread with it -- so loading is also
- * armed: a marker file is written before a plugin is first run and cleared once
- * it has survived a frame. Finding that marker at startup means the last
- * attempt never got that far, so the plugin is left disabled rather than
- * loaded into a crash loop. push.sh reports it, and pushing again re-arms.
+ * That covers a plugin that throws. It does not cover one that deadlocks the
+ * UI thread or kills the process outright -- and since plugins reload at
+ * launch, that is a crash loop. So loading is armed: a marker file is written
+ * before a plugin first runs, and cleared only once the host has seen the UI
+ * thread still running a couple of seconds after attach() returned. Finding
+ * that marker at startup means the last attempt never got that far, so the
+ * plugin is left disabled rather than loaded again. push.sh reports it, and
+ * pushing again re-arms.
  *
  * Note that swapping a plugin leaks its predecessor's classes: the old
  * DexClassLoader is dropped, but loaded classes are only collected once
@@ -41,6 +43,9 @@ final class PluginLoader {
     private final Context ctx;
     private final Plugin.Host host;
 
+    /** Host-side teardown after any detach: clear the container, drop callbacks. */
+    private final Runnable cleanup;
+
     /** Read on the GL and server threads; written when a plugin comes or goes. */
     private volatile Plugin plugin;
     private volatile String label = "none";
@@ -50,9 +55,10 @@ final class PluginLoader {
 
     private final Deque<String> log = new ArrayDeque<String>();
 
-    PluginLoader(Context ctx, Plugin.Host host) {
+    PluginLoader(Context ctx, Plugin.Host host, Runnable cleanup) {
         this.ctx = ctx;
         this.host = host;
+        this.cleanup = cleanup;
     }
 
     // ---- state ---------------------------------------------------------------
@@ -63,6 +69,17 @@ final class PluginLoader {
         Plugin p = plugin;
         if (p != null) return "plugin " + label + (armed ? " (unproven)" : " (ok)");
         return disarmFile().isFile() ? "plugin disabled after a failed load" : "plugin none";
+    }
+
+    /**
+     * The host reporting that the UI thread is still alive well after attach.
+     * Anything that was going to deadlock or kill the process has had its
+     * chance, so stop holding the load against the plugin at next launch.
+     */
+    void proved() {
+        if (!armed || plugin == null) return;
+        armed = false;
+        disarmFile().delete();
     }
 
     void note(String line) {
@@ -84,31 +101,32 @@ final class PluginLoader {
     //
     // Each of these is a no-op when no plugin is loaded, so callers don't branch.
 
-    void frame(float seconds) {
-        Plugin p = plugin;
-        if (p == null) return;
-        try {
-            p.frame(seconds);
-        } catch (Throwable t) {
-            fail("frame", t);
-            return;
-        }
-        // Survived a frame, so it isn't going to take the app down on load.
-        if (armed) {
-            armed = false;
-            disarmFile().delete();
-        }
-    }
-
-    boolean touch(int action, float x, float y) {
+    boolean event(String name, Object... args) {
         Plugin p = plugin;
         if (p == null) return false;
         try {
-            return p.touch(action, x, y);
+            return p.event(name, args);
         } catch (Throwable t) {
-            fail("touch", t);
+            fail("event " + name, t);
             return false;
         }
+    }
+
+    /**
+     * Wrap a plugin-supplied callback in the same guard everything else gets,
+     * so a throw from inside a per-frame callback detaches rather than killing
+     * the render thread.
+     */
+    Gl.FrameCallback guard(final Gl.FrameCallback inner) {
+        if (inner == null) return null;
+        return seconds -> {
+            if (plugin == null) return;
+            try {
+                inner.frame(seconds);
+            } catch (Throwable t) {
+                fail("frame", t);
+            }
+        };
     }
 
     String command(String line) {
@@ -123,7 +141,7 @@ final class PluginLoader {
         }
     }
 
-    /** GL thread. Attaches a freshly loaded plugin, replacing any predecessor. */
+    /** UI thread. Attaches a freshly loaded plugin, replacing any predecessor. */
     ShaderServer.Result attach(Plugin fresh, String name) {
         drop();
         try {
@@ -138,15 +156,21 @@ final class PluginLoader {
         return new ShaderServer.Result(true, "attached " + name + "\n");
     }
 
-    /** GL thread. Detaches the current plugin, if any. */
+    /** UI thread. Detaches the current plugin, if any. */
     void drop() {
         Plugin p = plugin;
         plugin = null;
-        if (p == null) return;
+        if (p == null) {
+            return;
+        }
         try {
             p.detach();
         } catch (Throwable t) {
             note("detach threw: " + t);
+        } finally {
+            // Runs even if the plugin's own cleanup threw -- the container and
+            // the frame callback are the host's to reclaim either way.
+            cleanup.run();
         }
     }
 

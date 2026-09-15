@@ -1,71 +1,186 @@
 package dev.aarstad.shader.plugin
 
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+
+import dev.aarstad.shader.Gl
 import dev.aarstad.shader.Plugin
 
 /**
- * The example plugin, in Kotlin.
+ * The example plugin: everything here is pushed as dex, so any of it changes
+ * without a reinstall.
  *
- * Nothing on the app's side knows this is Kotlin. The boundary is a dex file
- * and a Java interface, so the language on the far side is an implementation
- * detail -- the previous version of this class was Java and it hot-swapped
- * into the same running process this one does.
- *
- * kotlin-stdlib lives in the APK rather than here, so this still pushes as a
- * few KB. `toFloatOrNull` below is the proof it resolves at runtime: it is
- * stdlib, not something the compiler inlines away.
+ * It exists to show the contract is not shader-shaped. It builds a real Android
+ * view hierarchy in the container the host hands it, handles back, and keeps a
+ * counter across swaps -- none of which involves GL. The shader work happens
+ * through the optional "gl" extension, and the null check around it is the
+ * point: this same class would load and run in a host that draws nothing.
  */
 class Main : Plugin {
 
     private lateinit var host: Plugin.Host
+
+    /** Null in a host that isn't drawing shaders. Everything GL is guarded on it. */
+    private var gl: Gl? = null
+
+    private var panel: View? = null
+    private var label: TextView? = null
+    private var shownPreset = -1
 
     /** Last touch, already in shader space. */
     private var tx = 0f
     private var ty = 0f
     private var down = false
 
-    /** When the last press landed, on the shader clock. */
     private var tappedAt = -99f
-
-    /** How fast the tap envelope decays; e-folds per second. */
     private var decay = 1.6f
-
-    /** Seconds between automatic preset changes; 0 is off. */
     private var cycleEvery = 0f
     private var cycledAt = 0f
 
     override fun attach(h: Plugin.Host) {
         host = h
-        host.log("touchwarp/kt up, ${host.presetCount()} presets")
-        host.toast("plugin: touchwarp (kotlin)")
+        gl = h.extension("gl") as? Gl
+
+        // Survives a swap: the host holds it, not this instance, so it counts
+        // every push rather than resetting to 1 each time.
+        val swaps = host.state().getInt("swaps") + 1
+        host.state().putInt("swaps", swaps)
+
+        buildUi(swaps)
+        gl?.onFrame { t -> frame(t) }
+
+        host.log("touchwarp/ui up, swap #$swaps, gl=${gl != null}")
+        host.toast("plugin: touchwarp (ui)")
     }
 
-    override fun frame(t: Float) {
-        // Fed every frame regardless of which shader is drawing. Shaders that
-        // don't declare these simply never see them.
-        host.setUniform("u_touch", tx, ty)
-        host.setFloat("u_pulse", Math.exp(-maxOf(0f, t - tappedAt).toDouble() * decay).toFloat())
-        host.setFloat("u_down", if (down) 1f else 0f)
+    override fun detach() {
+        // The host empties the container and drops the frame callback itself,
+        // so there is nothing to undo here beyond letting go.
+        panel = null
+        label = null
+        host.log("touchwarp/ui down")
+    }
+
+    private fun buildUi(swaps: Int) {
+        val ctx = host.activity()
+        val density = ctx.resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        val caption = TextView(ctx).apply {
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 13f
+        }
+
+        val next = Button(ctx).apply {
+            text = "next"
+            setOnClickListener { cycle() }
+        }
+
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(4), dp(8), dp(4))
+            background = GradientDrawable().apply {
+                setColor(0xC0101014.toInt())
+                cornerRadius = dp(22).toFloat()
+            }
+            addView(caption, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(next)
+        }
+
+        // Clear of the gesture bar at the bottom and the cutout at the top.
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(dp(20), 0, dp(20), dp(56))
+        }
+
+        host.container().addView(row, lp)
+        panel = row
+        label = caption
+        refresh(swaps)
+    }
+
+    private fun refresh(swaps: Int = host.state().getInt("swaps")) {
+        val g = gl
+        val where = if (g == null) "no gl" else "${g.presetName(g.currentPreset())}"
+        label?.text = "$where   ·   swap #$swaps"
+    }
+
+    private fun cycle() {
+        val g = gl ?: return
+        val n = g.presetCount()
+        if (n > 0) g.select((g.currentPreset() + 1) % n)
+    }
+
+    /** GL thread, with the drawing program bound. */
+    private fun frame(t: Float) {
+        val g = gl ?: return
+
+        g.setUniform("u_touch", tx, ty)
+        g.setFloat("u_pulse", Math.exp(-maxOf(0f, t - tappedAt).toDouble() * decay).toFloat())
+        g.setFloat("u_down", if (down) 1f else 0f)
 
         if (cycleEvery > 0f && t - cycledAt >= cycleEvery) {
             cycledAt = t
-            val n = host.presetCount()
-            if (n > 0) host.select((host.currentPreset() + 1) % n)
+            val n = g.presetCount()
+            if (n > 0) g.select((g.currentPreset() + 1) % n)
+        }
+
+        // Only touch the UI when the preset actually changed -- this runs 60
+        // times a second and the label does not.
+        val current = g.currentPreset()
+        if (current != shownPreset) {
+            shownPreset = current
+            host.post { refresh() }
         }
     }
 
-    override fun touch(action: Int, x: Float, y: Float): Boolean {
-        tx = x
-        ty = y
-        when (action) {
-            MotionEvent.ACTION_DOWN -> {
-                down = true
-                tappedAt = host.seconds()
+    override fun event(name: String, vararg args: Any?): Boolean = when (name) {
+        Plugin.TOUCH -> {
+            val action = args[0] as Int
+            tx = args[1] as Float
+            ty = args[2] as Float
+            when (action) {
+                MotionEvent.ACTION_DOWN -> {
+                    down = true
+                    tappedAt = gl?.seconds() ?: 0f
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> down = false
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> down = false
+            // Not claiming it, so tap-to-cycle still works underneath.
+            false
         }
-        // Not claiming the touch, so tap-to-cycle still works underneath.
-        return false
+
+        // First back press hides the panel; a second one leaves the app, which
+        // is what returning false asks the host to do.
+        Plugin.BACK -> {
+            val p = panel
+            if (p != null && p.visibility == View.VISIBLE) {
+                p.visibility = View.GONE
+                true
+            } else {
+                false
+            }
+        }
+
+        Plugin.RESUME -> {
+            host.log("resumed")
+            false
+        }
+
+        // Unknown names must be ignored, so a plugin keeps working against a
+        // host that sends more than it knows about.
+        else -> false
     }
 
     override fun command(line: String): String {
@@ -74,6 +189,13 @@ class Main : Plugin {
         val args = parts.drop(1)
 
         return when (verb) {
+            "ui" -> {
+                val p = panel ?: return "no panel"
+                val show = args.firstOrNull() != "off"
+                host.post { p.visibility = if (show) View.VISIBLE else View.GONE }
+                "ui ${if (show) "on" else "off"}"
+            }
+
             "cycle" -> when {
                 args.firstOrNull() == "off" -> {
                     cycleEvery = 0f
@@ -82,7 +204,7 @@ class Main : Plugin {
                 args.isEmpty() -> "cycle ${describeCycle()}"
                 else -> args[0].toFloatOrNull()?.let {
                     cycleEvery = it
-                    cycledAt = host.seconds()
+                    cycledAt = gl?.seconds() ?: 0f
                     "auto-cycle every ${it}s"
                 } ?: "cycle wants seconds, or 'off'"
             }
@@ -95,7 +217,6 @@ class Main : Plugin {
                 } ?: "decay wants a number"
             }
 
-            // Fire the tap envelope without anyone touching the screen.
             "burst" -> {
                 if (args.size >= 2) {
                     val x = args[0].toFloatOrNull()
@@ -104,22 +225,19 @@ class Main : Plugin {
                     tx = x
                     ty = y
                 }
-                tappedAt = host.seconds()
+                tappedAt = gl?.seconds() ?: 0f
                 host.toast("burst")
                 "burst at $tx,$ty"
             }
 
-            "status" -> "touchwarp/kt  touch $tx,$ty  down $down  " +
+            "status" -> "touchwarp/ui  swap #${host.state().getInt("swaps")}  " +
+                "gl=${gl != null}  touch $tx,$ty  down $down  " +
                 "decay $decay  cycle ${describeCycle()}  " +
-                "preset ${host.presetName(host.currentPreset())}"
+                "panel=${if (panel?.visibility == View.VISIBLE) "shown" else "hidden"}"
 
-            else -> "commands: cycle <s>|off, decay <n>, burst [x y], status"
+            else -> "commands: ui on|off, cycle <s>|off, decay <n>, burst [x y], status"
         }
     }
 
     private fun describeCycle() = if (cycleEvery > 0f) "${cycleEvery}s" else "off"
-
-    override fun detach() {
-        host.log("touchwarp/kt down")
-    }
 }

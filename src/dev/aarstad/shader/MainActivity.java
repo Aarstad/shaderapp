@@ -9,9 +9,12 @@ import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -29,12 +32,23 @@ import javax.microedition.khronos.opengles.GL10;
 
 public class MainActivity extends Activity implements ShaderServer.Bridge {
 
+    /** How long a plugin must keep the UI thread alive before the load counts as proven. */
+    private static final long PROVEN_AFTER_MS = 2000;
+
     private GLSurfaceView view;
+
+    /** Laid over the shader; the plugin owns everything in it. */
+    private FrameLayout pluginContainer;
+
     private PresetRenderer renderer;
     private ShaderServer server;
     private PluginLoader plugins;
-    private int port = -1;
+    private Gl gl;
 
+    /** Scratch that outlives a plugin swap, since a push builds a new instance. */
+    private final Bundle pluginState = new Bundle();
+
+    private int port = -1;
     private String head;
 
     private int touchSlop;
@@ -52,24 +66,62 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         head = Presets.head(this);
         renderer = new PresetRenderer(head, Presets.load(this));
 
-        plugins = new PluginLoader(this, new HostImpl());
-        renderer.setPlugins(plugins, plugins.restore());
-
         view = new GLSurfaceView(this);
         view.setEGLContextClientVersion(2);
         view.setRenderer(renderer);
         view.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
-        setContentView(view);
+
+        pluginContainer = new FrameLayout(this);
+
+        // The shader draws underneath; anything a plugin adds sits on top.
+        FrameLayout root = new FrameLayout(this);
+        root.addView(view, matchParent());
+        root.addView(pluginContainer, matchParent());
+        setContentView(root);
+
+        gl = new GlImpl();
+        plugins = new PluginLoader(this, new HostImpl(), this::reclaim);
+
+        Plugin restored = plugins.restore();
+        if (restored != null && !attach(restored, "restored").ok) {
+            // Most likely a plugin built against an older Plugin interface.
+            // Whatever the reason, it will fail the same way next launch.
+            plugins.forget();
+        }
 
         goFullscreen();
     }
 
+    private static FrameLayout.LayoutParams matchParent() {
+        return new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+    }
+
+    /**
+     * Host-side teardown after any detach, from whichever thread noticed. The
+     * container and the frame callback belong to the host, so it takes them
+     * back rather than trusting a plugin that may have just thrown.
+     */
+    private void reclaim() {
+        runOnUiThread(() -> pluginContainer.removeAllViews());
+        renderer.setFrameCallback(null);
+    }
+
+    /** UI thread. Attaches and, if that works, starts the survival clock. */
+    private ShaderServer.Result attach(Plugin fresh, String name) {
+        ShaderServer.Result r = plugins.attach(fresh, name);
+        if (r.ok) {
+            view.postDelayed(plugins::proved, PROVEN_AFTER_MS);
+        }
+        return r;
+    }
+
     /**
      * The push channel only exists while the app is on screen. Anything posted
-     * to it has to reach the GL thread, and a backgrounded GLSurfaceView never
-     * drains its event queue -- so rather than let pushes pile up invisibly,
-     * the socket closes with the activity and the client gets a refused
-     * connection it can report honestly.
+     * to it has to reach the UI or GL thread, and a backgrounded activity
+     * drains neither -- so rather than let pushes pile up invisibly, the socket
+     * closes with the activity and the client gets a refused connection it can
+     * report honestly.
      */
     @Override
     protected void onStart() {
@@ -103,10 +155,9 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
      * swipe and then hidden again on their own.
      *
      * setSystemUiVisibility is deprecated in favour of WindowInsetsController
-     * (API 30), but we compile against android-23.jar -- the only platform
-     * Debian's android-sdk ships -- so the controller isn't on the classpath.
-     * The old flags still work because we target SDK 34; Android 15+ only
-     * ignores them for apps targeting 35 or higher.
+     * (API 30). The old flags still work because we target SDK 34; Android 15+
+     * only ignores them for apps targeting 35 or higher, so raising targetSdk
+     * and switching to the controller are one change, not two.
      */
     private void goFullscreen() {
         view.setSystemUiVisibility(
@@ -142,10 +193,11 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         if (hasFocus) goFullscreen();
     }
 
-    // GLSurfaceView isn't clickable, so touches fall through to the activity.
+    // Touches reach the activity when nothing in the plugin's container claims
+    // them first -- an ordinary view hierarchy, so a plugin that adds a button
+    // gets normal button behaviour without going through this at all.
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        // The plugin sees every touch first, in shader space, and can claim it.
         int w = view.getWidth();
         int h = view.getHeight();
         if (w > 0 && h > 0) {
@@ -154,7 +206,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             // gl_FragCoord counts up from the bottom; MotionEvent counts down
             // from the top, so the y axis has to be flipped to match centred().
             float sy = ((h - e.getY()) * 2f - h) / unit;
-            if (plugins.touch(e.getActionMasked(), sx, sy)) return true;
+            if (plugins.event(Plugin.TOUCH, e.getActionMasked(), sx, sy)) return true;
         }
 
         switch (e.getActionMasked()) {
@@ -177,10 +229,16 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         return false;
     }
 
+    @Override
+    public void onBackPressed() {
+        if (plugins.event(Plugin.BACK)) return;
+        super.onBackPressed();
+    }
+
     private void cycle() {
         int count = renderer.names().size();
         if (count == 0) return;
-        final int next = (renderer.index() + 1) % count;
+        int next = (renderer.index() + 1) % count;
         show(next);
         Toast.makeText(this, renderer.names().get(next), Toast.LENGTH_SHORT).show();
     }
@@ -189,26 +247,45 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         view.queueEvent(() -> renderer.select(i));
     }
 
-    @Override protected void onPause() { super.onPause(); view.onPause(); }
-    @Override protected void onResume() { super.onResume(); view.onResume(); }
+    @Override
+    protected void onPause() {
+        super.onPause();
+        plugins.event(Plugin.PAUSE);
+        view.onPause();
+    }
 
-    // ---- ShaderServer.Bridge -------------------------------------------------
+    @Override
+    protected void onResume() {
+        super.onResume();
+        view.onResume();
+        plugins.event(Plugin.RESUME);
+    }
+
+    // ---- thread hops ---------------------------------------------------------
     //
-    // These run on the server thread. Anything touching GL is funnelled through
-    // onGl(), which hands the work to the GL thread and waits for the answer so
-    // the compile log can go back in the HTTP response.
+    // Server-thread work that has to happen somewhere else, waiting for the
+    // answer so a compile log or an attach failure can go back in the response.
 
-    /** A unit of work that must happen on the GL thread. */
-    private interface GlTask {
+    private interface Task {
         ShaderServer.Result run();
     }
 
-    private ShaderServer.Result onGl(final GlTask task) {
-        final AtomicReference<ShaderServer.Result> slot =
-            new AtomicReference<ShaderServer.Result>();
-        final CountDownLatch done = new CountDownLatch(1);
+    private ShaderServer.Result onGl(Task task) {
+        return hop(task, r -> view.queueEvent(r),
+            "the app isn't rendering -- bring it to the foreground and push again\n");
+    }
 
-        view.queueEvent(() -> {
+    private ShaderServer.Result onUi(Task task) {
+        return hop(task, this::runOnUiThread,
+            "the UI thread isn't responding -- is the app on screen?\n");
+    }
+
+    private ShaderServer.Result hop(Task task, java.util.function.Consumer<Runnable> to,
+                                    String timeoutMessage) {
+        AtomicReference<ShaderServer.Result> slot = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+
+        to.accept(() -> {
             try {
                 slot.set(task.run());
             } catch (Throwable t) {
@@ -220,10 +297,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
 
         try {
             if (!done.await(5, TimeUnit.SECONDS)) {
-                // Queued runnables only drain while the view is resumed, so a
-                // timeout almost always means the app went to the background.
-                return new ShaderServer.Result(false,
-                    "the app isn't rendering -- bring it to the foreground and push again\n");
+                return new ShaderServer.Result(false, timeoutMessage);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -231,6 +305,8 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         }
         return slot.get();
     }
+
+    // ---- ShaderServer.Bridge -------------------------------------------------
 
     @Override
     public ShaderServer.Result install(String name, String body) {
@@ -289,7 +365,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             return new ShaderServer.Result(false, "no preset called " + which + "\n");
         }
         show(target);
-        final String shownName = names.get(target);
+        String shownName = names.get(target);
         toast(shownName);
         return new ShaderServer.Result(true, shownName + "\n");
     }
@@ -311,22 +387,22 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
 
     @Override
     public ShaderServer.Result installPlugin(byte[] dex, String className) {
-        final String name = className == null || className.trim().isEmpty()
+        String name = className == null || className.trim().isEmpty()
             ? PluginLoader.DEFAULT_CLASS : className.trim();
 
-        final Plugin fresh;
+        Plugin fresh;
         try {
             // Writing the dex and loading its classes is plain file and
-            // classloader work, so it stays off the GL thread; only attach()
-            // has to happen there.
+            // classloader work, so it stays off the UI thread; only attach()
+            // has to happen there, since a plugin builds views in it.
             fresh = plugins.load(dex, name);
         } catch (Throwable t) {
             return new ShaderServer.Result(false, "load failed: " + t + "\n");
         }
 
-        ShaderServer.Result r = onGl(() -> plugins.attach(fresh, plugins.labelFor(name)));
+        ShaderServer.Result r = onUi(() -> attach(fresh, plugins.labelFor(name)));
         if (!r.ok) plugins.forget();
-        else toast("\u21bb " + plugins.labelFor(name));
+        else toast("↻ " + plugins.labelFor(name));
         return r;
     }
 
@@ -336,12 +412,12 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             plugins.forget();
             return new ShaderServer.Result(false, "no plugin loaded\n");
         }
-        onGl(() -> {
+        onUi(() -> {
             plugins.drop();
             return new ShaderServer.Result(true, "");
         });
         plugins.forget();
-        toast("\u2212 plugin");
+        toast("− plugin");
         return new ShaderServer.Result(true, "plugin detached\n");
     }
 
@@ -360,11 +436,33 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         return new ShaderServer.Result(true, reply.endsWith("\n") ? reply : reply + "\n");
     }
 
-    /**
-     * What plugin code is handed. Uniform writes are only legal from frame(),
-     * which the renderer calls with the drawing program already bound.
-     */
+    // ---- what plugin code is handed ------------------------------------------
+
     private final class HostImpl implements Plugin.Host {
+        @Override public Activity activity() { return MainActivity.this; }
+        @Override public ViewGroup container() { return pluginContainer; }
+
+        @Override public File dataDir() {
+            File d = new File(getFilesDir(), "plugin-data");
+            if (!d.isDirectory()) d.mkdirs();
+            return d;
+        }
+
+        @Override public Bundle state() { return pluginState; }
+        @Override public void log(String message) { plugins.note(message); }
+        @Override public void toast(String message) { MainActivity.this.toast(message); }
+        @Override public void post(Runnable action) { runOnUiThread(action); }
+
+        @Override public Object extension(String name) {
+            return "gl".equals(name) ? gl : null;
+        }
+    }
+
+    /** The "gl" extension: the shader half of the app, offered to plugins that want it. */
+    private final class GlImpl implements Gl {
+        @Override public void onFrame(FrameCallback callback) {
+            renderer.setFrameCallback(plugins.guard(callback));
+        }
         @Override public void setUniform(String name, float... values) {
             renderer.setUniform(name, values);
         }
@@ -377,9 +475,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             return i >= 0 && i < n.size() ? n.get(i) : null;
         }
         @Override public int currentPreset() { return renderer.index(); }
-        @Override public void select(int i) { renderer.select(i); }
-        @Override public void toast(String message) { MainActivity.this.toast(message); }
-        @Override public void log(String message) { plugins.note(message); }
+        @Override public void select(int i) { show(i); }
         @Override public float seconds() { return renderer.seconds(); }
     }
 
@@ -408,35 +504,34 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         private static final class Prog {
             int program, aPos, uRes, uTime;
             /** Locations of plugin-set uniforms, by name. -1 means absent. */
-            final HashMap<String, Integer> locs = new HashMap<String, Integer>();
+            final HashMap<String, Integer> locs = new HashMap<>();
         }
 
         private final String head;
 
         // Read from the server and UI threads, mutated on the GL thread.
-        private final CopyOnWriteArrayList<String> names = new CopyOnWriteArrayList<String>();
-        private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<String>();
-        private final CopyOnWriteArrayList<String> errors = new CopyOnWriteArrayList<String>();
+        private final CopyOnWriteArrayList<String> names = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<String> errors = new CopyOnWriteArrayList<>();
 
         /** GL thread only, parallel to names/bodies. */
-        private final List<Prog> progs = new ArrayList<Prog>();
+        private final List<Prog> progs = new ArrayList<>();
 
         private FloatBuffer verts;
 
         /**
-         * The shared vertex shader. Unlike before it is kept alive for the life
-         * of the context rather than deleted after setup, because a pushed
-         * preset needs something to link against later.
+         * The shared vertex shader, kept alive for the life of the context
+         * rather than deleted after setup, because a pushed preset needs
+         * something to link against later.
          */
         private int vs;
 
         private volatile int index = 0;
+        private volatile Gl.FrameCallback frameCallback;
+
         private int width, height;
         private long startMs;
 
-        private PluginLoader plugins;
-        /** Restored at startup, attached once the surface exists. */
-        private Plugin pending;
         /** The program bound for this frame -- what setUniform() writes to. */
         private Prog drawing;
 
@@ -449,19 +544,20 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             }
         }
 
-        void setPlugins(PluginLoader plugins, Plugin pending) {
-            this.plugins = plugins;
-            this.pending = pending;
-        }
+        void setFrameCallback(Gl.FrameCallback cb) { frameCallback = cb; }
 
         List<String> names() { return names; }
         int index() { return index; }
         float seconds() { return (SystemClock.uptimeMillis() - startMs) / 1000.0f; }
+        String errorFor(int i) { return i < errors.size() ? errors.get(i) : null; }
 
         /**
          * Write a uniform on the program that is drawing this frame. A name the
          * shader doesn't declare resolves to -1 and is dropped, which is what
          * lets a single plugin feed a whole cycle of unrelated shaders.
+         *
+         * Only meaningful from inside a frame callback; anywhere else there is
+         * no bound program and this is a no-op rather than a crash.
          */
         void setUniform(String name, float[] v) {
             if (drawing == null || v == null) return;
@@ -489,7 +585,6 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             p.locs.put(name, loc);
             return loc;
         }
-        String errorFor(int i) { return i < errors.size() ? errors.get(i) : null; }
 
         void select(int i) {
             if (i < 0 || i >= progs.size()) return;
@@ -513,8 +608,8 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
                 Prog p = build(bodies.get(i));
                 if (p == null) {
                     // A persisted shader that no longer compiles -- on this
-                    // driver, or after an edit that was saved before a context
-                    // loss. Draw the fallback rather than crash on launch.
+                    // driver, or after an edit saved before a context loss.
+                    // Draw the fallback rather than crash on launch.
                     errors.set(i, lastError);
                     p = build(Presets.FALLBACK_BODY);
                 }
@@ -522,13 +617,6 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             }
             if (index >= progs.size()) index = 0;
             startMs = SystemClock.uptimeMillis();
-
-            // Deferred to here so a restored plugin's attach() can touch GL and
-            // find a live context, rather than running before the surface.
-            if (pending != null && plugins != null) {
-                plugins.attach(pending, "restored");
-                pending = null;
-            }
         }
 
         @Override
@@ -559,9 +647,12 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
 
             // Built-ins are set first, so a plugin can add uniforms or override
             // them. drawing is what setUniform() resolves names against.
-            drawing = p;
-            if (plugins != null) plugins.frame(t);
-            drawing = null;
+            Gl.FrameCallback cb = frameCallback;
+            if (cb != null) {
+                drawing = p;
+                cb.frame(t);
+                drawing = null;
+            }
 
             GLES20.glEnableVertexAttribArray(p.aPos);
             GLES20.glVertexAttribPointer(p.aPos, 2, GLES20.GL_FLOAT, false, 0, verts);
