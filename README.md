@@ -1,18 +1,44 @@
 # shader
 
-A GLES 2.0 domain-warped plasma, rendered fullscreen on Android. One activity,
-one fragment shader, no Gradle.
+A set of fullscreen GLES 2.0 shaders for Android. One activity, no Gradle.
+**Tap the screen to cycle presets.**
 
 Package: `dev.aarstad.shader`
+
+## Presets
+
+| | |
+|---|---|
+| Plasma | Domain-warped noise, five warp iterations |
+| Tunnel | Perspective tunnel; depth goes as 1/r, so rings bunch toward the centre |
+| Kaleidoscope | Six-fold angular mirror over an inversion fold |
+| Metaballs | Four inverse-distance blobs, thresholded so they fuse |
+| Voronoi | Animated cells, shaded on the gap between the two nearest seeds |
 
 ## How it draws
 
 `MainActivity` puts a `GLSurfaceView` in continuous render mode and keeps the
-screen on. `PlasmaRenderer` draws a single fullscreen triangle (cheaper than a
+screen on. `PresetRenderer` draws a single fullscreen triangle (cheaper than a
 quad, and it needs no index buffer); all the work happens in the fragment
-shader, which warps the UV domain five times, colours the result with a cosine
-palette, and applies a vignette. Five warp iterations is about the most a
-mid-range Mali will hold at 60fps on a 1080p-class screen.
+shader.
+
+Every preset in `Presets.java` is GLSL ES 1.00 and takes the same two uniforms
+-- `u_res` in pixels and `u_time` in seconds -- so the draw path never
+special-cases one. They share a preamble providing `centred()` (an
+aspect-corrected uv in [-1,1]) and `palette()` (the cosine palette). All
+programs are compiled once at surface creation and swapped by index, so cycling
+costs nothing at the tap.
+
+`u_time` is continuous across switches -- presets don't restart when you tap.
+
+These target a mid-range Mali at 1080p/60. Loop counts are the knob to turn
+first if a preset drops frames.
+
+## Adding a preset
+
+Write the fragment shader in `Presets.java` against that preamble, then add it
+to `NAMES` and `SOURCES` -- they are parallel arrays and the renderer sizes
+itself off them. Nothing else needs touching.
 
 ## Building
 

@@ -5,7 +5,9 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.view.MotionEvent;
 import android.view.WindowManager;
+import android.widget.Toast;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -17,23 +19,44 @@ import javax.microedition.khronos.opengles.GL10;
 public class MainActivity extends Activity {
 
     private GLSurfaceView view;
+    private PresetRenderer renderer;
+
+    /** Mirrors the renderer's index so the toast can name the preset off the UI thread. */
+    private int shown = 0;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        renderer = new PresetRenderer();
+
         view = new GLSurfaceView(this);
         view.setEGLContextClientVersion(2);
-        view.setRenderer(new PlasmaRenderer());
+        view.setRenderer(renderer);
         view.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         setContentView(view);
+    }
+
+    // GLSurfaceView isn't clickable, so touches fall through to the activity.
+    @Override
+    public boolean onTouchEvent(MotionEvent e) {
+        if (e.getActionMasked() != MotionEvent.ACTION_DOWN) return false;
+
+        shown = (shown + 1) % Presets.NAMES.length;
+        final int next = shown;
+        view.queueEvent(new Runnable() {
+            @Override public void run() { renderer.select(next); }
+        });
+
+        Toast.makeText(this, Presets.NAMES[next], Toast.LENGTH_SHORT).show();
+        return true;
     }
 
     @Override protected void onPause() { super.onPause(); view.onPause(); }
     @Override protected void onResume() { super.onResume(); view.onResume(); }
 
-    static class PlasmaRenderer implements GLSurfaceView.Renderer {
+    static class PresetRenderer implements GLSurfaceView.Renderer {
 
         // Fullscreen triangle -- cheaper than a quad and needs no index buffer.
         private static final float[] VERTS = {
@@ -48,29 +71,26 @@ public class MainActivity extends Activity {
             "    gl_Position = vec4(a_pos, 0.0, 1.0);\n" +
             "}\n";
 
-        // Domain-warped plasma. Five warp iterations is about the most a
-        // mid-range Mali will hold at 60fps on a 1080p-class screen.
-        private static final String FRAGMENT_SRC =
-            "precision highp float;\n" +
-            "uniform vec2 u_res;\n" +
-            "uniform float u_time;\n" +
-            "void main() {\n" +
-            "    vec2 uv = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);\n" +
-            "    float t = u_time * 0.35;\n" +
-            "    vec2 p = uv;\n" +
-            "    for (int i = 0; i < 5; i++) {\n" +
-            "        p += vec2(sin(p.y * 3.0 + t), cos(p.x * 3.0 - t)) * 0.25;\n" +
-            "    }\n" +
-            "    float d = length(p);\n" +
-            "    vec3 col = 0.5 + 0.5 * cos(vec3(0.0, 2.1, 4.2) + d * 3.0 + t);\n" +
-            "    col *= 1.0 - 0.35 * length(uv);\n" +
-            "    gl_FragColor = vec4(col, 1.0);\n" +
-            "}\n";
-
         private FloatBuffer verts;
-        private int program;
-        private int aPos, uRes, uTime;
+
+        // One compiled program per preset. Every preset takes the same two
+        // uniforms, so the draw path doesn't care which one is bound.
+        private final int[] programs = new int[Presets.SOURCES.length];
+        private final int[] aPos     = new int[Presets.SOURCES.length];
+        private final int[] uRes     = new int[Presets.SOURCES.length];
+        private final int[] uTime    = new int[Presets.SOURCES.length];
+
+        /** Touched only on the GL thread, via GLSurfaceView.queueEvent. */
+        private int index = 0;
+
+        private int width, height;
         private long startMs;
+
+        void select(int i) {
+            index = i;
+            // u_res is per-program state and this one may never have been sized.
+            if (width > 0) applyResolution(i);
+        }
 
         @Override
         public void onSurfaceCreated(GL10 unused, EGLConfig config) {
@@ -80,41 +100,60 @@ public class MainActivity extends Activity {
             verts.put(VERTS).position(0);
 
             int vs = compile(GLES20.GL_VERTEX_SHADER, VERTEX_SRC);
-            int fs = compile(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SRC);
 
-            program = GLES20.glCreateProgram();
-            GLES20.glAttachShader(program, vs);
-            GLES20.glAttachShader(program, fs);
-            GLES20.glLinkProgram(program);
+            for (int i = 0; i < Presets.SOURCES.length; i++) {
+                int fs = compile(GLES20.GL_FRAGMENT_SHADER, Presets.SOURCES[i]);
 
-            int[] ok = new int[1];
-            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, ok, 0);
-            if (ok[0] == 0) {
-                throw new RuntimeException("link failed: " + GLES20.glGetProgramInfoLog(program));
+                int p = GLES20.glCreateProgram();
+                GLES20.glAttachShader(p, vs);
+                GLES20.glAttachShader(p, fs);
+                GLES20.glLinkProgram(p);
+
+                int[] ok = new int[1];
+                GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, ok, 0);
+                if (ok[0] == 0) {
+                    throw new RuntimeException(
+                        "link failed for " + Presets.NAMES[i] + ": " + GLES20.glGetProgramInfoLog(p));
+                }
+
+                // The vertex shader is shared, so it stays alive until every
+                // program that references it is linked; the fragment shader is
+                // only needed by this one.
+                GLES20.glDeleteShader(fs);
+
+                programs[i] = p;
+                aPos[i]  = GLES20.glGetAttribLocation(p, "a_pos");
+                uRes[i]  = GLES20.glGetUniformLocation(p, "u_res");
+                uTime[i] = GLES20.glGetUniformLocation(p, "u_time");
             }
 
-            aPos  = GLES20.glGetAttribLocation(program, "a_pos");
-            uRes  = GLES20.glGetUniformLocation(program, "u_res");
-            uTime = GLES20.glGetUniformLocation(program, "u_time");
+            GLES20.glDeleteShader(vs);
             startMs = SystemClock.uptimeMillis();
         }
 
         @Override
         public void onSurfaceChanged(GL10 unused, int w, int h) {
             GLES20.glViewport(0, 0, w, h);
-            GLES20.glUseProgram(program);
-            GLES20.glUniform2f(uRes, (float) w, (float) h);
+            width = w;
+            height = h;
+            for (int i = 0; i < programs.length; i++) applyResolution(i);
+        }
+
+        private void applyResolution(int i) {
+            GLES20.glUseProgram(programs[i]);
+            GLES20.glUniform2f(uRes[i], (float) width, (float) height);
         }
 
         @Override
         public void onDrawFrame(GL10 unused) {
+            int i = index;
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            GLES20.glUseProgram(program);
-            GLES20.glUniform1f(uTime, (SystemClock.uptimeMillis() - startMs) / 1000.0f);
-            GLES20.glEnableVertexAttribArray(aPos);
-            GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, verts);
+            GLES20.glUseProgram(programs[i]);
+            GLES20.glUniform1f(uTime[i], (SystemClock.uptimeMillis() - startMs) / 1000.0f);
+            GLES20.glEnableVertexAttribArray(aPos[i]);
+            GLES20.glVertexAttribPointer(aPos[i], 2, GLES20.GL_FLOAT, false, 0, verts);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
-            GLES20.glDisableVertexAttribArray(aPos);
+            GLES20.glDisableVertexAttribArray(aPos[i]);
         }
 
         private static int compile(int type, String src) {
