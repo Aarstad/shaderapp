@@ -17,6 +17,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -31,6 +32,7 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
     private GLSurfaceView view;
     private PresetRenderer renderer;
     private ShaderServer server;
+    private PluginLoader plugins;
     private int port = -1;
 
     private String head;
@@ -49,6 +51,9 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
 
         head = Presets.head(this);
         renderer = new PresetRenderer(head, Presets.load(this));
+
+        plugins = new PluginLoader(this, new HostImpl());
+        renderer.setPlugins(plugins, plugins.restore());
 
         view = new GLSurfaceView(this);
         view.setEGLContextClientVersion(2);
@@ -142,6 +147,18 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
     // GLSurfaceView isn't clickable, so touches fall through to the activity.
     @Override
     public boolean onTouchEvent(MotionEvent e) {
+        // The plugin sees every touch first, in shader space, and can claim it.
+        int w = view.getWidth();
+        int h = view.getHeight();
+        if (w > 0 && h > 0) {
+            float unit = Math.min(w, h);
+            float sx = (e.getX() * 2f - w) / unit;
+            // gl_FragCoord counts up from the bottom; MotionEvent counts down
+            // from the top, so the y axis has to be flipped to match centred().
+            float sy = ((h - e.getY()) * 2f - h) / unit;
+            if (plugins.touch(e.getActionMasked(), sx, sy)) return true;
+        }
+
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getX();
@@ -306,6 +323,86 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         return sb.toString();
     }
 
+    @Override
+    public ShaderServer.Result installPlugin(byte[] dex, String className) {
+        final String name = className == null || className.trim().isEmpty()
+            ? PluginLoader.DEFAULT_CLASS : className.trim();
+
+        final Plugin fresh;
+        try {
+            // Writing the dex and loading its classes is plain file and
+            // classloader work, so it stays off the GL thread; only attach()
+            // has to happen there.
+            fresh = plugins.load(dex, name);
+        } catch (Throwable t) {
+            return new ShaderServer.Result(false, "load failed: " + t + "\n");
+        }
+
+        ShaderServer.Result r = onGl(new GlTask() {
+            @Override public ShaderServer.Result run() {
+                return plugins.attach(fresh, plugins.labelFor(name));
+            }
+        });
+        if (!r.ok) plugins.forget();
+        else toast("\u21bb " + plugins.labelFor(name));
+        return r;
+    }
+
+    @Override
+    public ShaderServer.Result dropPlugin() {
+        if (!plugins.active()) {
+            plugins.forget();
+            return new ShaderServer.Result(false, "no plugin loaded\n");
+        }
+        onGl(new GlTask() {
+            @Override public ShaderServer.Result run() {
+                plugins.drop();
+                return new ShaderServer.Result(true, "");
+            }
+        });
+        plugins.forget();
+        toast("\u2212 plugin");
+        return new ShaderServer.Result(true, "plugin detached\n");
+    }
+
+    @Override
+    public String pluginStatus() {
+        String logs = plugins.logs();
+        return plugins.status() + (logs.isEmpty() ? "" : "\n" + logs.trim());
+    }
+
+    @Override
+    public ShaderServer.Result command(String line) {
+        String reply = plugins.command(line);
+        if (reply == null) {
+            return new ShaderServer.Result(false, "no plugin loaded\n");
+        }
+        return new ShaderServer.Result(true, reply.endsWith("\n") ? reply : reply + "\n");
+    }
+
+    /**
+     * What plugin code is handed. Uniform writes are only legal from frame(),
+     * which the renderer calls with the drawing program already bound.
+     */
+    private final class HostImpl implements Plugin.Host {
+        @Override public void setUniform(String name, float... values) {
+            renderer.setUniform(name, values);
+        }
+        @Override public void setFloat(String name, float value) {
+            renderer.setFloat(name, value);
+        }
+        @Override public int presetCount() { return renderer.names().size(); }
+        @Override public String presetName(int i) {
+            List<String> n = renderer.names();
+            return i >= 0 && i < n.size() ? n.get(i) : null;
+        }
+        @Override public int currentPreset() { return renderer.index(); }
+        @Override public void select(int i) { renderer.select(i); }
+        @Override public void toast(String message) { MainActivity.this.toast(message); }
+        @Override public void log(String message) { plugins.note(message); }
+        @Override public float seconds() { return renderer.seconds(); }
+    }
+
     private void toast(final String text) {
         runOnUiThread(new Runnable() {
             @Override public void run() {
@@ -334,6 +431,8 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         /** One linked program and its uniform locations. */
         private static final class Prog {
             int program, aPos, uRes, uTime;
+            /** Locations of plugin-set uniforms, by name. -1 means absent. */
+            final HashMap<String, Integer> locs = new HashMap<String, Integer>();
         }
 
         private final String head;
@@ -359,6 +458,12 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
         private int width, height;
         private long startMs;
 
+        private PluginLoader plugins;
+        /** Restored at startup, attached once the surface exists. */
+        private Plugin pending;
+        /** The program bound for this frame -- what setUniform() writes to. */
+        private Prog drawing;
+
         PresetRenderer(String head, List<Presets.Preset> initial) {
             this.head = head;
             for (Presets.Preset p : initial) {
@@ -368,8 +473,46 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             }
         }
 
+        void setPlugins(PluginLoader plugins, Plugin pending) {
+            this.plugins = plugins;
+            this.pending = pending;
+        }
+
         List<String> names() { return names; }
         int index() { return index; }
+        float seconds() { return (SystemClock.uptimeMillis() - startMs) / 1000.0f; }
+
+        /**
+         * Write a uniform on the program that is drawing this frame. A name the
+         * shader doesn't declare resolves to -1 and is dropped, which is what
+         * lets a single plugin feed a whole cycle of unrelated shaders.
+         */
+        void setUniform(String name, float[] v) {
+            if (drawing == null || v == null) return;
+            int loc = locate(drawing, name);
+            if (loc < 0) return;
+            switch (v.length) {
+                case 1: GLES20.glUniform1f(loc, v[0]); break;
+                case 2: GLES20.glUniform2f(loc, v[0], v[1]); break;
+                case 3: GLES20.glUniform3f(loc, v[0], v[1], v[2]); break;
+                case 4: GLES20.glUniform4f(loc, v[0], v[1], v[2], v[3]); break;
+                default: break;
+            }
+        }
+
+        void setFloat(String name, float value) {
+            if (drawing == null) return;
+            int loc = locate(drawing, name);
+            if (loc >= 0) GLES20.glUniform1f(loc, value);
+        }
+
+        private int locate(Prog p, String name) {
+            Integer cached = p.locs.get(name);
+            if (cached != null) return cached;
+            int loc = GLES20.glGetUniformLocation(p.program, name);
+            p.locs.put(name, loc);
+            return loc;
+        }
         String errorFor(int i) { return i < errors.size() ? errors.get(i) : null; }
 
         void select(int i) {
@@ -403,6 +546,13 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             }
             if (index >= progs.size()) index = 0;
             startMs = SystemClock.uptimeMillis();
+
+            // Deferred to here so a restored plugin's attach() can touch GL and
+            // find a live context, rather than running before the surface.
+            if (pending != null && plugins != null) {
+                plugins.attach(pending, "restored");
+                pending = null;
+            }
         }
 
         @Override
@@ -425,9 +575,18 @@ public class MainActivity extends Activity implements ShaderServer.Bridge {
             if (i >= progs.size()) return;
             Prog p = progs.get(i);
 
+            float t = (SystemClock.uptimeMillis() - startMs) / 1000.0f;
+
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             GLES20.glUseProgram(p.program);
-            GLES20.glUniform1f(p.uTime, (SystemClock.uptimeMillis() - startMs) / 1000.0f);
+            GLES20.glUniform1f(p.uTime, t);
+
+            // Built-ins are set first, so a plugin can add uniforms or override
+            // them. drawing is what setUniform() resolves names against.
+            drawing = p;
+            if (plugins != null) plugins.frame(t);
+            drawing = null;
+
             GLES20.glEnableVertexAttribArray(p.aPos);
             GLES20.glVertexAttribPointer(p.aPos, 2, GLES20.GL_FLOAT, false, 0, verts);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);

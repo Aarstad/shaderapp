@@ -9,6 +9,12 @@
 #   ./push.sh -s Voronoi                    switch preset
 #   ./push.sh -r Tunnel                     drop the pushed version, restore built-in
 #
+#   ./push.sh -p                            build plugin/ and hot-swap the dex in
+#   ./push.sh -p some.dex                   push a dex you already have
+#   ./push.sh -c 'cycle 6'                  send a command to the plugin
+#   ./push.sh -i                            plugin status and recent log
+#   ./push.sh -P                            detach the plugin
+#
 # The preset name is the filename without .frag. A name the app has never seen
 # is appended to the cycle, so new presets need no reinstall either.
 set -uo pipefail
@@ -90,6 +96,26 @@ push_file() {
 
 case "${1:-}" in
   -l|--list)   request GET  /presets ;;
+  -i|--info)   request GET  /plugin ;;
+  -P|--drop-plugin) request DELETE /plugin ;;
+  -c|--command)
+    [ $# -ge 2 ] || die "usage: push.sh -c '<text>'"
+    tmp=$(mktemp); printf '%s' "$2" > "$tmp"
+    request POST /command "$tmp"; rc=$?
+    rm -f "$tmp"; exit $rc ;;
+  -p|--plugin)
+    dex=${2:-}
+    if [ -z "$dex" ]; then
+      # The plugin links against the app's own classes, so it builds in the
+      # same container the APK does.
+      echo "building plugin..."
+      proot-distro login "${DISTRO:-ubuntu}" --bind "$PWD:/mnt/shaderapp" -- \
+        /bin/bash -c "cd /mnt/shaderapp && ./build-plugin.sh" || die "plugin build failed"
+      dex=plugin/build/classes.dex
+    fi
+    [ -f "$dex" ] || die "no such dex: $dex"
+    echo "pushing $(command wc -c < "$dex") bytes of dex"
+    request POST /plugin "$dex" ;;
   -s|--select) [ $# -ge 2 ] || die "usage: push.sh -s <Name>"
                request POST "/select/$2" ;;
   -r|--revert) [ $# -ge 2 ] || die "usage: push.sh -r <Name>"
@@ -111,7 +137,7 @@ case "${1:-}" in
     done
     ;;
   ""|-h|--help)
-    command sed -n '4,13p' "$0" | command sed 's/^# \{0,1\}//'
+    command sed -n '4,20p' "$0" | command sed 's/^# \{0,1\}//'
     echo
     echo "app is at $BASE"
     ;;

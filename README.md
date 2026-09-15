@@ -14,6 +14,8 @@ Package: `dev.aarstad.shader`
 | Kaleidoscope | Six-fold angular mirror over an inversion fold |
 | Metaballs | Four inverse-distance blobs, thresholded so they fuse |
 | Voronoi | Animated cells, shaded on the gap between the two nearest seeds |
+| Ripple | Radial wave, damped with distance |
+| Touch | Follows `u_touch`/`u_pulse` from the plugin; centres itself without one |
 
 ## Live shader push
 
@@ -70,6 +72,10 @@ upward and toasts it at startup; `push.sh` probes that range to find it.
 | `POST /preset/<Name>` | body is fragment shader source; compiles and shows it |
 | `DELETE /preset/<Name>` | revert to the built-in |
 | `POST /select/<Name>` | switch preset (index also accepted) |
+| `GET /plugin` | plugin status and recent log |
+| `POST /plugin` | body is a dex file; `X-Plugin-Class` optional |
+| `DELETE /plugin` | detach it |
+| `POST /command` | body is free text for the plugin |
 
 Loopback-bound means only code already on this device can reach it. Any app on
 the phone could post to it, and the worst it can do is draw something -- that is
@@ -83,6 +89,64 @@ Two things that make loopback less obvious than it looks, both handled:
   connections, which is indistinguishable from the app not running.
 - `push.sh` passes `--noproxy '*'`. An exported `http_proxy` (Claude Code sets
   one) otherwise intercepts even loopback requests and answers for the app.
+
+## Live code push
+
+Shaders hot-swap because GLSL is text. Java hot-swaps too, with one hard limit:
+**a class already loaded can never be replaced.** Only new classes from a new
+loader come in. So the app is split -- everything that must stay put lives in
+the APK, and the interesting part lives behind `Plugin`, in a dex that gets
+pushed:
+
+    ./push.sh -p              build plugin/ and swap the dex in
+    ./push.sh -p some.dex     push a dex you already have
+    ./push.sh -c 'cycle 6'    send free text to the plugin
+    ./push.sh -i              status and recent log
+    ./push.sh -P              detach it
+
+A plugin is a class `dev.aarstad.shader.plugin.Main` with a no-argument
+constructor (override with the `X-Plugin-Class` header). It gets every frame on
+the GL thread with the drawing program already bound, every touch in shader
+space, and free text from `-c`.
+
+`Plugin` is the one thing a push cannot change -- adding a method to it means a
+reinstall. That is why it is small and loose: `setUniform()` takes any name and
+any arity, `command()` takes any string. The example plugin invents `u_touch`,
+`u_pulse` and `u_down`, plus a `cycle`/`decay`/`status` command vocabulary, and
+the app knows about none of them.
+
+Because a uniform the current shader doesn't declare resolves to -1 and is
+dropped, one plugin can feed a whole cycle of unrelated shaders and each picks
+up only what it declares.
+
+### Not crashing
+
+Plugin code is hostile by assumption. Every call into it is wrapped in a catch
+of `Throwable`: one that throws is logged, detached mid-frame, and dropped from
+the reload pointer, and the app carries on with its built-in behaviour.
+
+That handles throwing. It does not handle hanging or dying inside `attach()`,
+which would take the GL thread down -- and since plugins reload at launch, that
+is a crash loop. So loading is *armed*: a marker file is written before a plugin
+first runs and cleared once it has survived a frame. Finding that marker at
+startup means the last attempt never got that far, so the plugin is left
+disabled and reported instead of loaded again.
+
+Swapping a plugin leaks its predecessor's classes -- the old loader is dropped,
+but loaded classes are collected only once nothing references them, and the
+runtime is conservative. A few KB per swap on a development channel is a fair
+price for not restarting.
+
+### Building a plugin
+
+`./build-plugin.sh` runs in the container, compiling `plugin/src` against
+`build/classes` so `Plugin` resolves to the same class the app holds, then dexes
+only the plugin's own classes. Run `./build.sh` first -- it links against its
+output. `./push.sh -p` does both.
+
+Android 14+ refuses to load a dex file that is still writable, so the pushed
+dex is written, `setReadOnly()`, then loaded; each push gets a fresh filename
+because `DexClassLoader` caches optimised output against the path.
 
 ## How it draws
 
