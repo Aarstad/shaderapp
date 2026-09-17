@@ -50,7 +50,8 @@ find_base() {
 }
 
 BASE=$(find_base) || die "app isn't listening.
-Open the shader app and leave it on screen -- the push channel only runs in the foreground."
+Start the shader app. The push channel runs for the activity's whole life, so it
+can be behind Termux -- but not swiped away."
 
 HEAD_LINES=$("${CURL[@]}" -f -m 2 "$BASE/health" | command awk '/^headLines /{print $2}')
 : "${HEAD_LINES:=0}"
