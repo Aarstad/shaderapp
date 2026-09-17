@@ -20,7 +20,11 @@ if adb get-state >/dev/null 2>&1; then
   echo "[install] adb -> $APK"
   adb install -r "$APK"
   echo "[launch] $PKG"
-  adb shell am start -n "$PKG/.MainActivity"
+  # By category rather than by class name. The launcher activity is meant to be
+  # repointed -- the manifest offers .host.HostActivity as the bare template --
+  # and a class named here would be a second place to remember, which is how
+  # this line came to be pointing at a .MainActivity that never existed.
+  adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null
   exit 0
 fi
 
