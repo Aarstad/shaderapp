@@ -16,6 +16,7 @@ Package: `dev.aarstad.shader`
 | Voronoi | Animated cells, shaded on the gap between the two nearest seeds |
 | Ripple | Radial wave, damped with distance |
 | Touch | Follows `u_touch`/`u_pulse` from the plugin; centres itself without one |
+| Electric | Noise-warped bolt snapped to a quantised clock -- the stepping is what reads as electric |
 
 The app reopens on whichever preset it was last left on, stored by name since
 the cycle can gain or lose presets between launches.
@@ -54,9 +55,9 @@ which includes the shared preamble.
 A name the app has never seen is *appended* to the cycle, so new presets need
 no reinstall either:
 
-    cp assets/shaders/Plasma.frag assets/shaders/Ripple.frag
-    $EDITOR assets/shaders/Ripple.frag
-    ./push.sh assets/shaders/Ripple.frag     # sixth preset, live
+    cp assets/shaders/Plasma.frag assets/shaders/Drift.frag
+    $EDITOR assets/shaders/Drift.frag
+    ./push.sh assets/shaders/Drift.frag      # ninth preset, live
 
 Pushed shaders are written to the app's private storage, so they survive the
 app being killed. `-r` deletes that copy: the name reverts to the built-in if
@@ -64,9 +65,10 @@ the APK has one, and drops out of the cycle if it does not.
 
 ### The channel
 
-`ShaderServer` is a small HTTP server bound to `127.0.0.1`, running only while
-the activity is in the foreground. The app takes the first free port from 8777
-upward and toasts it at startup; `push.sh` probes that range to find it.
+`PushServer` is a small HTTP server bound to `127.0.0.1`, running for as long as
+the activity exists rather than only while it is on screen. The app takes the
+first free port from 8777 upward and toasts it at startup; `push.sh` probes that
+range to find it.
 
 | | |
 |---|---|
@@ -84,9 +86,17 @@ upward and toasts it at startup; `push.sh` probes that range to find it.
 | `DELETE /file/<name>` | remove it |
 
 Loopback-bound means only code already on this device can reach it. Any app on
-the phone could post to it, and the worst it can do is draw something -- that is
-the right trade for a development channel, but it is why the socket closes the
-moment the app leaves the foreground.
+the phone could post to it, and the worst it can do is draw something -- the
+right trade for a development channel. The socket closes when the activity is
+destroyed.
+
+**Pushes work with the app backgrounded**, which took a fix to be true.
+`GLSurfaceView` drops the EGL context on pause but keeps draining its GL
+thread's queue, so a pushed shader compiled against nothing and failed with an
+empty log -- including built-ins that had already compiled once.
+`setPreserveEGLContextOnPause(true)` keeps the context. If a device ever
+declines to, an empty log now says the context looks gone rather than blaming
+the shader.
 
 Two things that make loopback less obvious than it looks, both handled:
 
@@ -170,6 +180,12 @@ keeps a counter across swaps -- none of which involves GL. Its shader work is
 all behind `extension("gl")`, guarded on null, which is the point: the same
 class would load and run in a host that draws nothing.
 
+`Gl` is deliberately one pass: clear, use the preset's program, run the frame
+callback, draw a fullscreen triangle. Anything that has to read its own
+previous frame -- feedback, separable blur, reaction-diffusion -- is unreachable
+through it. `docs/gl-multipass.md` writes down which two methods would change
+that and why it stops at two. Not implemented.
+
 ### What still needs a reinstall
 
 The manifest. Activities, permissions, services, the app name and icon are
@@ -244,6 +260,11 @@ price for not restarting.
 `build.sh` runs the whole APK pipeline by hand:
 
     aapt -> javac -> d8 -> zipalign -> apksigner
+
+Ahead of that it runs every preset through `glslangValidator`, if one is
+installed -- shaders are compiled by the driver at runtime, so a broken one
+would otherwise only show up on the phone. No validator, and the step says it
+skipped.
 
 **This does not build under native Termux**, but it does build on the phone --
 inside the proot Ubuntu container:
