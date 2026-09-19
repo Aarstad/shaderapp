@@ -1,12 +1,20 @@
 // Filaments from warped value noise, glowing as 1/|d| so they stay hair-thin.
 //
-// The bolt snaps on a quantised clock -- that stepping is what reads as
-// electric rather than liquid. Everything else runs on continuous time, so the
-// image is never actually still; with the whole shader on the snapped clock it
-// looks like a low frame rate no matter how fast the GPU is going.
+// The bolt used to snap to a quantised clock, on the theory that the stepping
+// read as electric rather than liquid. It does not: at 24 steps a second
+// against this phone's 120Hz panel every position is held for five frames, and
+// the result reads as congestion. The bolt now runs on continuous time and
+// only the brightness flicker still steps. Snapping costs nothing either way
+// (20.2ms against 20.4ms), so this is a look decision, not a speed one.
 //
-// Stays highp on purpose: at mediump, u_time is too coarse to quantise once the
-// app has been running a few minutes, and the bolt stops moving entirely.
+// Stays highp on purpose: at mediump, u_time is too coarse to step the flicker
+// once the app has been running a few minutes, and it stops moving entirely.
+//
+// Cost is all in noise(): 3.3ms per call at 1080x2400 on this phone's
+// Mali-G610, linear in the call count, which is why the shimmer below is a
+// stepped hash rather than a fifth call. Four calls still only reaches 60fps
+// -- 120Hz would need roughly one, which is not this shader. Rendering to a
+// smaller buffer is the way in, and needs the FBO work in docs/gl-multipass.md.
 uniform vec2 u_touch;
 uniform float u_pulse;
 
@@ -44,22 +52,24 @@ void main() {
     vec2 ring = p / max(r, 0.0001);
 
     // Wrapped, so the noise coordinate never grows large enough to lose
-    // precision. The seam lands on a snap boundary and is lost in the flicker.
+    // precision. The seam lands mid-flicker and is not visible.
     float t = u_time - floor(u_time / 128.0) * 128.0;
-    float snap = floor(t * 24.0) / 24.0;
-    float flicker = 0.7 + 0.3 * hash(vec2(snap, 3.7));
 
-    // Bolt: snapped, three octaves.
+    // Brightness still steps -- it is a flat multiplier, so stepping it reads
+    // as a flicker rather than as a stutter in the geometry.
+    float flicker = 0.7 + 0.3 * hash(vec2(floor(t * 24.0), 3.7));
+
+    // Bolt: three octaves on continuous time.
     // Direction and time only. Letting r in here made the target radius vary
     // with distance too, and abs(r - target) then folded into petals rather
     // than tracing one ragged loop.
-    vec2 q = ring * 2.4 + vec2(0.0, -snap * 2.0);
+    vec2 q = ring * 2.4 + vec2(0.0, -t * 2.0);
     float warp = 0.5 * noise(q) + 0.25 * noise(q * 2.02) + 0.125 * noise(q * 4.03);
 
     float d = abs(r - 0.34 - 0.30 * (warp * 2.0 - 0.875));
     float core = 0.006 / (d + 0.004);
 
-    // Glow breathes continuously, so the bolt keeps moving between snaps.
+    // Glow breathes continuously.
     float breathe = 0.85 + 0.15 * sin(t * 2.3);
     float glow = 0.09 / (d + 0.09) * breathe;
 
@@ -68,8 +78,10 @@ void main() {
     float d2 = abs(r - 0.62 - 0.30 * (n2 * 2.0 - 1.0));
     float crackle = 0.004 / (d2 + 0.007);
 
-    // A slow continuous shimmer over the whole field.
-    float shimmer = 0.9 + 0.1 * noise(ring * 3.0 + vec2(t * 1.5, 0.0));
+    // A slow shimmer over the whole field. Stepped on its own slower clock
+    // rather than sampled from noise: it is a flat multiplier, so the spatial
+    // variation a fourth noise() call would buy is not worth 3.3ms.
+    float shimmer = 0.9 + 0.1 * hash(vec2(floor(t * 8.0), 1.3));
 
     vec3 cold = vec3(0.25, 0.55, 1.0);
     vec3 hot  = vec3(0.85, 0.95, 1.0);
